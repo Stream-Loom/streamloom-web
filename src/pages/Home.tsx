@@ -411,18 +411,19 @@ export function Home() {
     return () => clearTimeout(timer)
   }, [targetId, playableChannels.length])
 
-  if (error) {
-    return (
-      <div className="home-error">
-        <p>⚠️ {error}</p>
-        <button onClick={refresh}>Retry</button>
-      </div>
-    )
-  }
+  // Only when there is nothing to show. A failed refresh with channels already
+  // on screen must never replace the app with an error page.
+  const showLoadError = Boolean(error) && !channels.length
 
   return (
     <div className="page-wrapper home-page">
-      {loading && !channels.length ? (
+      {showLoadError ? (
+        <div className="home-error" role="alert">
+          <h2 className="home-error__title">Channels aren&apos;t loading right now</h2>
+          <p className="home-error__text">{error}</p>
+          <button onClick={refresh} autoFocus>Try again</button>
+        </div>
+      ) : loading && !channels.length ? (
         <div className="home-skeleton">
           <div className="skeleton" style={{ height: '40vh', marginBottom: 40, borderRadius: 28 }} />
           {[1, 2, 3].map((i) => (

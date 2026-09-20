@@ -93,8 +93,8 @@ async function readMeta(): Promise<(CatalogueMeta & { prefix: string }) | null> 
 /** Generation prefix from the last catalogue load, reused for EPG reads. */
 let _prefix: string | null = null
 
-async function resolvePrefix(): Promise<string | null> {
-  if (_prefix) return _prefix
+async function resolvePrefix(fresh = false): Promise<string | null> {
+  if (_prefix && !fresh) return _prefix
   const meta = await readMeta()
   if (!meta) return null
   _prefix = meta.prefix
@@ -163,17 +163,24 @@ export async function fetchCatalogueFromRedis(): Promise<CatalogueFromRedis | nu
   })
 }
 
-/** Channel ids that have schedule data, read from the current generation. */
-export async function fetchEpgIdsFromRedis(): Promise<string[]> {
-  const prefix = await resolvePrefix()
-  if (!prefix) return []
+/**
+ * Channel ids that have schedule data, read from the current generation.
+ *
+ * Returns null when the list could not be read (missing, unreachable or
+ * malformed), so callers can tell "schedules unavailable" apart from a
+ * successful read that simply lists no channels. `fresh` re-reads the
+ * generation pointer first, for long-lived tabs whose cached prefix may be stale.
+ */
+export async function fetchEpgIdsFromRedis(fresh = false): Promise<string[] | null> {
+  const prefix = await resolvePrefix(fresh)
+  if (!prefix) return null
   const raw = await redisGet(prefix + ':epg:ids')
-  if (!raw) return []
+  if (!raw) return null
   try {
     const ids = JSON.parse(raw)
-    return Array.isArray(ids) ? (ids as string[]) : []
+    return Array.isArray(ids) ? (ids as string[]) : null
   } catch {
-    return []
+    return null
   }
 }
 

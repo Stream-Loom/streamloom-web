@@ -21,7 +21,8 @@ export interface CatalogueWorkerResponse {
   ok: boolean
   channels: EnrichedChannel[]
   categories: Category[]
-  epgIds: string[]
+  /** Null when the schedule index could not be read. */
+  epgIds: string[] | null
   searchIndex?: SearchIndex
   error?: string
 }
@@ -43,8 +44,8 @@ ctx.onmessage = async (event: MessageEvent<CatalogueWorkerRequest>) => {
         ok: false,
         channels: [],
         categories: [],
-        epgIds: [],
-        error: 'Catalogue is not available in Redis',
+        epgIds: null,
+        error: 'Catalogue is not available',
       })
       return
     }
@@ -65,7 +66,7 @@ ctx.onmessage = async (event: MessageEvent<CatalogueWorkerRequest>) => {
       ok: false,
       channels: [],
       categories: [],
-      epgIds: [],
+      epgIds: null,
       error: (e as Error).message,
     })
   }

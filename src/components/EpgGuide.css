@@ -201,6 +201,23 @@
   flex-shrink: 0;
 }
 
+.epg-guide__stale-action {
+  margin-left: auto;
+  padding: 4px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-full);
+  background: transparent;
+  color: var(--text-primary);
+  font-size: 12px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.epg-guide__stale-action:hover,
+.epg-guide__stale-action:focus-visible {
+  background: var(--bg-card-hover);
+}
+
 /* ---------- Virtualized row layer ---------- */
 
 .epg-guide__spacer {

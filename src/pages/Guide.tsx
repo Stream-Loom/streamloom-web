@@ -36,7 +36,7 @@ function readInitialState(): GuideFilterState {
 }
 
 export function Guide() {
-  const { channels, categories, epgChannelIds, loading } = useChannels()
+  const { channels, categories, epgChannelIds, epgAvailable, refreshEpg, loading } = useChannels()
   const { favouriteIds } = useFavourites()
   const [state, setState] = useState<GuideFilterState>(readInitialState)
 
@@ -73,9 +73,25 @@ export function Guide() {
     [state, favouriteIds],
   )
 
+  // Without a schedule index the guide falls back to every playable channel, so
+  // the page stays a working channel browser instead of an empty grid.
+  const schedulesUnavailable = !loading && channels.length > 0 && !epgAvailable
+
+  // Each visit to an unavailable guide gets a fresh, cheap attempt at recovery.
+  useEffect(() => {
+    if (schedulesUnavailable) void refreshEpg()
+  }, [schedulesUnavailable, refreshEpg])
+
+  const guideIds = useMemo(
+    () => (schedulesUnavailable
+      ? new Set(channels.filter((ch) => ch.stream).map((ch) => ch.id))
+      : epgChannelIds),
+    [schedulesUnavailable, channels, epgChannelIds],
+  )
+
   const availableCount = useMemo(
-    () => channels.filter((ch) => epgChannelIds.has(ch.id) && ch.stream).length,
-    [channels, epgChannelIds],
+    () => channels.filter((ch) => guideIds.has(ch.id) && ch.stream).length,
+    [channels, guideIds],
   )
 
   /**
@@ -94,7 +110,7 @@ export function Guide() {
       <div className="guide-page__header">
         <h1 className="guide-page__title">
           TV Guide
-          {!loading && (
+          {!loading && !schedulesUnavailable && (
             <span className="guide-page__count">
               {availableCount.toLocaleString()} channels with schedules
             </span>
@@ -114,9 +130,11 @@ export function Guide() {
         <EpgGuide
           channels={channels}
           categories={categories}
-          epgChannelIds={epgChannelIds}
+          epgChannelIds={guideIds}
           filters={filters}
           matchSet={matchSet}
+          schedulesUnavailable={schedulesUnavailable}
+          onRetrySchedules={() => void refreshEpg()}
         />
       )}
     </div>

@@ -34,6 +34,13 @@ interface Props {
    * below can membership-test in O(1) instead of re-scanning.
    */
   matchSet: Set<string> | null
+  /**
+   * True when the schedule index could not be read. The guide then lists the
+   * playable channels without programme data, shows a notice, and skips the
+   * per-channel schedule requests that could only fail.
+   */
+  schedulesUnavailable?: boolean
+  onRetrySchedules?: () => void
 }
 
 /** Rows rendered beyond the viewport on each side. */
@@ -77,12 +84,12 @@ async function loadEpg(channelId: string): Promise<EpgProgram[]> {
   if (cached) return cached
   try {
     const data = await fetchEpgFromRedis(channelId)
-    cacheEpg(channelId, data)
+    // An empty result is indistinguishable from a transient read failure, so it
+    // is not cached: pinning it would hide a schedule that arrives moments later.
+    if (data.length > 0) cacheEpg(channelId, data)
     return data
   } catch {
-    const empty: EpgProgram[] = []
-    cacheEpg(channelId, empty)
-    return empty
+    return []
   }
 }
 
@@ -186,7 +193,15 @@ function guideMetricsFor(viewportWidth: number): { sidebar: number; rowHeight: n
   return { sidebar: SIDEBAR_WIDTH, rowHeight: ROW_HEIGHT }
 }
 
-export function EpgGuide({ channels, categories, epgChannelIds, filters, matchSet }: Props) {
+export function EpgGuide({
+  channels,
+  categories,
+  epgChannelIds,
+  filters,
+  matchSet,
+  schedulesUnavailable = false,
+  onRetrySchedules,
+}: Props) {
   const navigate = useNavigate()
   const viewportRef = useRef<HTMLDivElement>(null)
   const rafRef = useRef(0)
@@ -275,13 +290,13 @@ export function EpgGuide({ channels, categories, epgChannelIds, filters, matchSe
   // the background so scrolling into new rows never waits on the network.
   useEffect(() => {
     guideIdsRef.current = guideChannels.map((c) => c.id)
-    if (guideIdsRef.current.length === 0) return
+    if (schedulesUnavailable || guideIdsRef.current.length === 0) return
     const firstScreen = Math.ceil(viewportH / rowHeight) + 12
     prefetchEpg(guideIdsRef.current.slice(0, firstScreen), bumpCache)
     const timer = setTimeout(() => prefetchEpg(guideIdsRef.current, bumpCache), 400)
     return () => clearTimeout(timer)
     // eslint-disable-next-line react-hooks/exhaustive-deps -- keyed on the id set
-  }, [guideKey, viewportH, rowHeight, bumpCache])
+  }, [guideKey, viewportH, rowHeight, bumpCache, schedulesUnavailable])
 
   // Vertical virtualization: only rows intersecting the viewport are rendered.
   const totalHeight = guideChannels.length * rowHeight
@@ -369,7 +384,19 @@ export function EpgGuide({ channels, categories, epgChannelIds, filters, matchSe
         onScrollToNow={scrollToNow}
       />
 
-      {isStale && (
+      {schedulesUnavailable && (
+        <div className="epg-guide__stale" role="status">
+          <span aria-hidden="true">⚠</span>
+          Programme schedules aren&apos;t available right now. Channels are still live, so pick one to watch.
+          {onRetrySchedules && (
+            <button type="button" className="epg-guide__stale-action" onClick={onRetrySchedules}>
+              Try again
+            </button>
+          )}
+        </div>
+      )}
+
+      {isStale && !schedulesUnavailable && (
         <div className="epg-guide__stale" role="status">
           <span aria-hidden="true">⚠</span>
           Showing the latest published schedules ({new Date(

@@ -38,6 +38,10 @@ interface UseChannelsResult {
   loading: boolean
   error: string | null
   refresh: () => void
+  /** False when the schedule index could not be read; the Guide degrades instead of failing. */
+  epgAvailable: boolean
+  /** Re-reads only the schedule index (two small requests, not the whole catalogue). */
+  refreshEpg: () => Promise<void>
   /** Where catalogue data was last loaded from */
   source: 'redis' | 'cache' | null
 }
@@ -45,7 +49,8 @@ interface UseChannelsResult {
 interface CatalogueLoad {
   channels: EnrichedChannel[]
   categories: Category[]
-  epgIds: string[]
+  /** Null when the schedule index could not be read. */
+  epgIds: string[] | null
   /** Optional prebuilt trigram index (worker path only). */
   searchIndex?: SearchIndex
 }
@@ -54,6 +59,7 @@ interface CatalogueLoad {
 let _channels: EnrichedChannel[] | null = null
 let _categories: Category[] | null = null
 let _epgIds: Set<string> | null = null
+let _epgAvailable = false
 let _loading = true
 let _error: string | null = null
 let _source: 'redis' | 'cache' | null = null
@@ -144,17 +150,66 @@ async function loadCatalogue(): Promise<CatalogueLoad | null> {
 function applyLoad(load: CatalogueLoad, source: 'redis' | 'cache') {
   _channels = load.channels
   _categories = load.categories
-  _epgIds = new Set(load.epgIds)
+  if (load.epgIds) {
+    _epgIds = new Set(load.epgIds)
+    _epgAvailable = load.epgIds.length > 0
+  } else {
+    // The schedule index could not be read this time. Keep whatever was known
+    // rather than replacing it with an empty set that looks like "no schedules".
+    _epgAvailable = (_epgIds?.size ?? 0) > 0
+  }
   _source = source
   _loading = false
   _error = null
+  _retryAttempt = 0
   // Install the search index (worker path) or build one on the main thread.
   const index = load.searchIndex ?? buildSearchIndex(load.channels)
   installSearchIndex(index)
 }
 
+/** Shown when nothing can be loaded and there is no cached catalogue to fall back on. */
+const LOAD_FAILED_MESSAGE =
+  "We couldn't load channels right now. Check your connection and try again. We'll keep trying in the background."
+
+/** Backoff between automatic retries while the catalogue is empty. */
+const RETRY_DELAYS_MS = [15_000, 30_000, 60_000, 300_000]
+let _retryTimer: ReturnType<typeof setTimeout> | null = null
+let _retryAttempt = 0
+
+function cancelRetry() {
+  if (_retryTimer) {
+    clearTimeout(_retryTimer)
+    _retryTimer = null
+  }
+}
+
+function scheduleRetry() {
+  if (_retryTimer) return
+  const delay = RETRY_DELAYS_MS[Math.min(_retryAttempt, RETRY_DELAYS_MS.length - 1)]
+  _retryAttempt += 1
+  _retryTimer = setTimeout(() => {
+    _retryTimer = null
+    loadData(true).catch(() => {})
+  }, delay)
+}
+
+/**
+ * Records a failed load. The error only surfaces when there is nothing on
+ * screen: a stale-but-working catalogue always beats an error page.
+ */
+function reportLoadFailure(detail: string) {
+  console.warn('[catalogue] load failed:', detail)
+  _loading = false
+  if (!_channels || _channels.length === 0) {
+    _error = LOAD_FAILED_MESSAGE
+    scheduleRetry()
+  }
+  notify()
+}
+
 async function loadData(force = false) {
   if (!force && _channels) return
+  cancelRetry()
 
   // Instant path: IndexedDB first, then refresh from Redis in the background.
   if (!force) {
@@ -163,6 +218,7 @@ async function loadData(force = false) {
       _channels = stored.channels
       _categories = stored.categories
       _epgIds = new Set(stored.epgIds)
+      _epgAvailable = stored.epgIds.length > 0
       _source = 'cache'
       _loading = false
       _error = null
@@ -175,8 +231,10 @@ async function loadData(force = false) {
     }
   }
 
-  // Only surface the spinner when there is nothing on screen already.
-  if (!_channels || _channels.length === 0) {
+  // Only surface the spinner when there is nothing on screen already. An error
+  // that is already showing stays put during automatic retries, so the page
+  // does not flicker between skeleton and error every few seconds.
+  if ((!_channels || _channels.length === 0) && !_error) {
     _loading = true
     notify()
   }
@@ -185,11 +243,9 @@ async function loadData(force = false) {
     const load = await loadCatalogue()
 
     if (!load) {
-      _loading = false
-      _error = isUpstashConfigured
-        ? 'Catalogue unavailable — the sync worker has not published it to Redis yet.'
-        : 'Upstash Redis is not configured.'
-      notify()
+      reportLoadFailure(
+        isUpstashConfigured ? 'catalogue has not been published' : 'data source is not configured',
+      )
       return
     }
 
@@ -199,13 +255,35 @@ async function loadData(force = false) {
     writeStoredCatalogue({
       channels: load.channels,
       categories: load.categories,
-      epgIds: load.epgIds,
+      epgIds: load.epgIds ?? [...(_epgIds ?? [])],
     }).catch(() => {})
   } catch (e) {
-    _error = (e as Error).message
-    _loading = false
-    notify()
+    reportLoadFailure((e as Error).message)
   }
+}
+
+let _epgRefresh: Promise<void> | null = null
+
+/**
+ * Re-reads just the schedule index and updates availability.
+ *
+ * Far cheaper than a full catalogue reload, so the Guide can retry on every
+ * visit. Reads the generation pointer fresh, since a long-lived tab may hold a
+ * prefix from before the sync worker published a newer generation.
+ */
+function refreshEpgIds(): Promise<void> {
+  if (_epgRefresh) return _epgRefresh
+  _epgRefresh = (async () => {
+    const ids = await fetchEpgIdsFromRedis(true)
+    if (ids && ids.length > 0) {
+      _epgIds = new Set(ids)
+      _epgAvailable = true
+      notify()
+    }
+  })()
+    .catch(() => {})
+    .finally(() => { _epgRefresh = null })
+  return _epgRefresh
 }
 
 // Kick off loading as soon as this module is first imported
@@ -305,7 +383,12 @@ export function useChannels(): UseChannelsResult {
     return () => { _listeners.delete(rerender) }
   }, [])
 
-  const refresh = useCallback(() => loadData(true), [])
+  // Clearing the error first shows the loading skeleton, so a manual Retry gives feedback.
+  const refresh = useCallback(() => {
+    _error = null
+    return loadData(true)
+  }, [])
+  const refreshEpg = useCallback(() => refreshEpgIds(), [])
 
   const raw = _channels ?? []
   const hideBroken = isHideBrokenStreamsEnabled()
@@ -322,6 +405,8 @@ export function useChannels(): UseChannelsResult {
     loading: _loading,
     error: _error,
     refresh,
+    epgAvailable: _epgAvailable,
+    refreshEpg,
     source: _source,
   }
 }
@@ -332,6 +417,7 @@ export async function clearCatalogueCache() {
   _channels = null
   _categories = null
   _epgIds = null
+  _epgAvailable = false
   _source = null
 }
 

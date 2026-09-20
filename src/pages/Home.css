@@ -341,9 +341,24 @@
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  min-height: 80vh;
-  gap: var(--space-lg);
+  min-height: 60vh;
+  gap: var(--space-md);
+  padding: 0 var(--space-lg);
+  text-align: center;
   color: var(--text-secondary);
+}
+
+.home-error__title {
+  margin: 0;
+  font-size: 22px;
+  font-weight: 700;
+  color: var(--text-primary);
+}
+
+.home-error__text {
+  max-width: 460px;
+  margin: 0 0 var(--space-sm);
+  line-height: 1.5;
 }
 
 .home-error button {
