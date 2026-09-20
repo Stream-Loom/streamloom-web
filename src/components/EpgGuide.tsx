@@ -79,16 +79,39 @@ function cachedEpg(channelId: string): EpgProgram[] | undefined {
   return epgCache.get(channelId)
 }
 
+/**
+ * Channels whose last read came back empty, mapped to when they may be retried.
+ *
+ * An empty result is indistinguishable from a transient read failure, so it is
+ * not pinned in `epgCache` (that would hide a schedule arriving moments later),
+ * but it is also not re-requested on every filter change: a short cooldown
+ * keeps a partially published feed from turning into a request storm.
+ */
+const EMPTY_RETRY_MS = 60_000
+const emptyRetryAt = new Map<string, number>()
+
+function isCoolingDown(channelId: string): boolean {
+  const until = emptyRetryAt.get(channelId)
+  if (until === undefined) return false
+  if (until > Date.now()) return true
+  emptyRetryAt.delete(channelId)
+  return false
+}
+
 async function loadEpg(channelId: string): Promise<EpgProgram[]> {
   const cached = epgCache.get(channelId)
   if (cached) return cached
   try {
     const data = await fetchEpgFromRedis(channelId)
-    // An empty result is indistinguishable from a transient read failure, so it
-    // is not cached: pinning it would hide a schedule that arrives moments later.
-    if (data.length > 0) cacheEpg(channelId, data)
+    if (data.length > 0) {
+      emptyRetryAt.delete(channelId)
+      cacheEpg(channelId, data)
+    } else {
+      emptyRetryAt.set(channelId, Date.now() + EMPTY_RETRY_MS)
+    }
     return data
   } catch {
+    emptyRetryAt.set(channelId, Date.now() + EMPTY_RETRY_MS)
     return []
   }
 }
@@ -110,7 +133,7 @@ const EMPTY_PROGRAMS: EpgProgram[] = []
  * one render each instead of one render for the whole wave.
  */
 function prefetchEpg(ids: string[], onLoaded: () => void) {
-  const missing = ids.filter((id) => !epgCache.has(id) && !inflight.has(id))
+  const missing = ids.filter((id) => !epgCache.has(id) && !inflight.has(id) && !isCoolingDown(id))
   if (missing.length === 0) return
 
   let index = 0
