@@ -113,7 +113,7 @@ StreamLoom Web is the browser-native Progressive Web App (PWA) companion to the 
 | `sl_recent_v1` | `localStorage` | `string[]` | Recent channels list (capped at 20) |
 | `sl_low_latency` | `localStorage` | `'true' \| 'false'` | HLS live low-latency toggle |
 | `sl_auto_skip` | `localStorage` | `'true' \| 'false'` | Auto-advance to next channel on error |
-| `sl_hide_broken` | `localStorage` | `'true' \| 'false'` | Hide failed/unresponsive channels toggle (default true) |
+| `sl_hide_broken` | `localStorage` | `'true' \| 'false'` | Hide failed/unresponsive channels toggle (default false; on only when the user turns it on) |
 | `sl_last_viewed` | `sessionStorage`| `string` | Last focused channel ID |
 | `sl_active_playlist` | `sessionStorage`| `string[]` | Filtered playlist ID list (guarded `< 500` items) |
 

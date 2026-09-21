@@ -11,6 +11,20 @@ try {
   localStorage.removeItem('sl_broken_streams_v1')
 } catch {}
 
+/**
+ * Marks written before failures were classified (see streamFailure.ts) may have
+ * come from the user's own network dropping, so they cannot be trusted. Drop
+ * them once; the versioned key stops this from running again, and bumping the
+ * version re-runs it if a later change invalidates marks the same way.
+ */
+const BROKEN_RESET_KEY = 'sl_broken_reset_v1'
+try {
+  if (!localStorage.getItem(BROKEN_RESET_KEY)) {
+    localStorage.removeItem(BROKEN_STREAMS_KEY)
+    localStorage.setItem(BROKEN_RESET_KEY, '1')
+  }
+} catch {}
+
 interface BrokenRecord {
   timestamp: number
 }
@@ -54,12 +68,13 @@ export function notifyStreamStateChange() {
   })
 }
 
+/** Off unless the user turned it on: a channel is hidden only by an explicit choice. */
 export function isHideBrokenStreamsEnabled(): boolean {
   if (_cachedHideBroken !== null) return _cachedHideBroken
   try {
-    _cachedHideBroken = localStorage.getItem(HIDE_BROKEN_KEY) !== 'false'
+    _cachedHideBroken = localStorage.getItem(HIDE_BROKEN_KEY) === 'true'
   } catch {
-    _cachedHideBroken = true
+    _cachedHideBroken = false
   }
   return _cachedHideBroken
 }
@@ -104,6 +119,10 @@ export function isStreamBroken(channelId: string): boolean {
   return getBrokenSet().has(channelId)
 }
 
+/**
+ * Low-level writer. Play failures must go through `recordStreamFailure`
+ * (streamFailure.ts), which only calls this for stream-specific evidence.
+ */
 export function markStreamBroken(channelId: string) {
   try {
     const map = getBrokenMap()
