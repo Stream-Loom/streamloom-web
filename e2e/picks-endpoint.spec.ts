@@ -1,16 +1,15 @@
 import { test, expect } from '@playwright/test'
+// FIRST, and deliberately: this creates the seam registry that the Function
+// libraries look for as they are evaluated. Imported below them, the caches
+// would hold no hooks and every reset would throw. See e2e/support/testSeams.ts.
+import { ageIptvCache, resetIptvCache, resetJwksCache } from './support/testSeams'
 import {
   bindBucket,
   onRequest as picksHandler,
   writeHistory,
 } from '../functions/api/picks/index'
 import { onRequest as channelsHandler } from '../functions/api/picks/channels'
-import {
-  readAccessConfig,
-  resetAccessJwksCache,
-  verifyAccessJwt,
-} from '../functions/api/_lib/accessJwt'
-import { ageIptvCacheForTest, resetIptvCache } from '../functions/api/_lib/iptvOrg'
+import { readAccessConfig, verifyAccessJwt } from '../functions/api/_lib/accessJwt'
 import { jwks, makeTestKey, mintToken, validPayload, type TestKey } from './support/accessTokens'
 
 /**
@@ -233,7 +232,7 @@ test.beforeAll(async () => {
 })
 
 test.beforeEach(() => {
-  resetAccessJwksCache()
+  resetJwksCache()
   resetIptvCache()
   stub = stubFetch([key])
 })
@@ -909,9 +908,31 @@ test.describe('the optional email allow-list', () => {
     }
   })
 
-  test('a blank list is the same as unset, not an empty allow-list', async () => {
-    const config = readAccessConfig({ ...ENV_VARS, CF_ACCESS_ALLOWED_EMAILS: '   ' })
-    expect(config?.allowedEmails).toEqual([])
+  test('absent means no gate; present-but-blank fails closed rather than disabling it', async () => {
+    // Absent: the key is not on the environment at all.
+    expect(readAccessConfig(ENV_VARS)?.allowedEmails).toEqual([])
+
+    // Present but producing no gate. `""` and `"   "` used to trim to an empty
+    // list and silently turn the gate off, while `","` refused everyone: the
+    // same slip with opposite outcomes. Both are now a refused configuration.
+    for (const blank of ['', '   ', ',', ' , ', '\t\n']) {
+      expect(readAccessConfig({ ...ENV_VARS, CF_ACCESS_ALLOWED_EMAILS: blank })).toBeNull()
+
+      const { bucket, writes } = makeBucket()
+      const res = await call(picksHandler, writeRequest(await goodToken()), {
+        ...ENV_VARS,
+        CF_ACCESS_ALLOWED_EMAILS: blank,
+        CATALOGUE_BUCKET: bucket,
+      })
+      expect(res.status).toBe(503)
+      expect(writes()).toEqual([])
+    }
+  })
+
+  test('a non-string value is a misconfiguration, not an absent variable', async () => {
+    for (const value of [42, true, [], null, {}]) {
+      expect(readAccessConfig({ ...ENV_VARS, CF_ACCESS_ALLOWED_EMAILS: value })).toBeNull()
+    }
   })
 })
 
@@ -1045,7 +1066,7 @@ test.describe('how stale the iptv-org list may get', () => {
     const { bucket } = makeBucket()
     await call(picksHandler, writeRequest(await goodToken()), { ...ENV_VARS, CATALOGUE_BUCKET: bucket })
     stub.iptvStatus = 500
-    ageIptvCacheForTest(hours * 60 * 60 * 1000)
+    ageIptvCache(hours * 60 * 60 * 1000)
   }
 
   test('a copy inside 24 hours still saves, and the response says how old it was', async () => {
@@ -1127,5 +1148,33 @@ test.describe('history is append-only under concurrency', () => {
     }
     await writeHistory(bindBucket({ CATALOGUE_BUCKET: spy })!, AT, '{}')
     expect(seen[0]).toMatchObject({ onlyIf: { etagDoesNotMatch: '*' } })
+  })
+})
+
+test.describe('the Function libraries ship no state mutators', () => {
+  test('nothing named reset/age/clear/set is exported from a production module', async () => {
+    const modules: [string, Record<string, unknown>][] = [
+      ['_lib/accessJwt', await import('../functions/api/_lib/accessJwt')],
+      ['_lib/iptvOrg', await import('../functions/api/_lib/iptvOrg')],
+      ['_lib/picksSchema', await import('../functions/api/_lib/picksSchema')],
+      ['picks/index', await import('../functions/api/picks/index')],
+      ['picks/channels', await import('../functions/api/picks/channels')],
+    ]
+    for (const [name, mod] of modules) {
+      const mutators = Object.keys(mod).filter((key) => /^(reset|age|clear|seed|set)[A-Z]/.test(key))
+      expect(mutators, `${name} exports a state mutator`).toEqual([])
+    }
+  })
+
+  test('the seams are registered only because a test created the registry', async () => {
+    const registry = (globalThis as Record<string, unknown>).__streamloomTestSeams as
+      | Record<string, unknown>
+      | undefined
+    // Present here, because e2e/support/testSeams.ts created it before the
+    // libraries were evaluated. Nothing in functions/ or src/ ever does.
+    expect(registry).toBeDefined()
+    expect(typeof registry?.resetJwksCache).toBe('function')
+    expect(typeof registry?.resetIptvCache).toBe('function')
+    expect(typeof registry?.ageIptvCache).toBe('function')
   })
 })

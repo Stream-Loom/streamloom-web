@@ -233,9 +233,15 @@ it reaches the browser bundle.
    on the list is refused with 403 even though Access let it through. An Access
    policy widened by accident — an extra rule, a group that grew, a second
    identity provider attached to the application — then does not by itself become
-   permission to publish. Leaving it unset keeps the Access policy as the only
-   allow-list. A value that is *present but malformed* fails the whole
-   configuration closed, so a typo here cannot widen access.
+   permission to publish.
+
+   **Either leave it out entirely, or give it a real address.** Not setting the
+   variable at all means "no second gate" and is the supported way to go without
+   one. Setting it to a blank or whitespace value, a lone comma, or anything that
+   is not a valid address **refuses every request with 503 until it is fixed** —
+   a deliberate choice, so a half-typed value can never quietly leave the gate
+   off while the dashboard shows it as configured. To remove the gate later,
+   **delete the variable**; do not blank it.
 3. **Settings -> Bindings -> Add -> R2 bucket**: variable name
    `CATALOGUE_BUCKET`, bucket `streamloom-catalogue`. **Not** `channel-icons` —
    that bucket sits behind a public read route. Redeploy for it to take effect.
@@ -262,6 +268,23 @@ if it is not there. That is what stops a binding aimed at the wrong bucket, or a
 an empty one, from being seeded with a picks object nothing will ever read. Until
 the worker's first R2 publish, `/admin` opens and lets you build groups, and the
 save returns "CATALOGUE_BUCKET does not contain catalogue/meta.json".
+
+### One check to run after the first deploy
+
+**Save twice within a second, then list the bucket's `picks-history/` prefix.**
+There must be **two distinct objects**, not one.
+
+History objects are written with a conditional put (`If-None-Match: *`), which is
+what makes "append-only" true even when two saves land in the same millisecond.
+That condition has only ever been exercised against a test double, so this is the
+one behaviour of the write path that a real bucket has to confirm.
+
+If you see only one object, the store ignored the condition. It is not urgent and
+nothing is lost in normal use — keys carry a millisecond timestamp, so two saves
+a person makes by hand never collide, and the retry loop still moves a collision
+to a new suffix. What it would mean is that the *simultaneous* case could
+overwrite, so say so in the pull request or an issue rather than relying on the
+append-only claim for anything that matters.
 
 Then open `/admin`, sign in through Access, and save. A pin already in the live
 generation appears on the site within about a minute; one that is not yet

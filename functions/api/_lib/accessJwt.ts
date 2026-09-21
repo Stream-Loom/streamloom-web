@@ -147,20 +147,31 @@ export function readAccessConfig(env: unknown): AccessConfig | null {
   host = host.replace(/\/+$/, '')
   if (!TEAM_DOMAIN_RE.test(host)) return null
 
-  // Optional. Absent or blank leaves the list empty, which means "no second gate"
-  // and is the behaviour before this variable existed. A value that is present but
-  // unusable (every entry malformed, or too many) fails the configuration closed
-  // rather than being silently ignored — a typo here must not widen access.
-  const rawEmails = typeof e.CF_ACCESS_ALLOWED_EMAILS === 'string' ? e.CF_ACCESS_ALLOWED_EMAILS.trim() : ''
+  // Optional, and the distinction that matters is **absent** versus **present**,
+  // not empty versus non-empty.
+  //
+  // Absent — the key is not on the environment at all — means "there is no second
+  // gate", the behaviour before this variable existed. *Present* means the owner
+  // intended a gate, so anything that would not produce one is a misconfiguration
+  // and fails the whole configuration closed: a blank value, whitespace, a lone
+  // comma, a malformed address, more than MAX_ALLOWED_EMAILS of them, or a
+  // non-string. Otherwise `CF_ACCESS_ALLOWED_EMAILS=" "` would quietly disable
+  // the gate the owner thought they had turned on, while `","` refused everything
+  // — the same mistake with opposite outcomes.
   let allowedEmails: string[] = []
-  if (rawEmails.length > 0) {
-    const entries = rawEmails
-      .split(',')
-      .map((entry) => entry.trim().toLowerCase())
-      .filter((entry) => entry.length > 0)
+  if ('CF_ACCESS_ALLOWED_EMAILS' in e) {
+    if (typeof e.CF_ACCESS_ALLOWED_EMAILS !== 'string') return null
+    const entries = e.CF_ACCESS_ALLOWED_EMAILS.split(',').map((entry) => entry.trim().toLowerCase())
     if (entries.length === 0 || entries.length > MAX_ALLOWED_EMAILS) return null
-    if (!entries.every((entry) => entry.length <= 320 && entry.includes('@') && !hasSpace(entry))) return null
+    if (
+      !entries.every(
+        (entry) => entry.length > 0 && entry.length <= 320 && entry.includes('@') && !hasSpace(entry),
+      )
+    ) {
+      return null
+    }
     allowedEmails = [...new Set(entries)]
+    if (allowedEmails.length === 0) return null
   }
 
   const teamDomain = 'https://' + host
@@ -178,9 +189,19 @@ interface JwksEntry {
 
 const jwksCache = new Map<string, JwksEntry>()
 
-/** Test seam: drops the JWKS cache so each case starts cold. */
-export function resetAccessJwksCache(): void {
-  jwksCache.clear()
+/*
+ * Test seam, absent in production.
+ *
+ * A test process creates `globalThis.__streamloomTestSeams` before this module is
+ * evaluated (e2e/support/testSeams.ts) and finds its hooks on it. Nothing in the
+ * deployed bundle creates that object, no request can, and a Workers isolate
+ * offers no way to set a global before module evaluation — so this block
+ * registers nothing in production and no state mutator is exported from here.
+ */
+{
+  const seams = (globalThis as { __streamloomTestSeams?: Record<string, unknown> })
+    .__streamloomTestSeams
+  if (seams) seams.resetJwksCache = () => jwksCache.clear()
 }
 
 /**

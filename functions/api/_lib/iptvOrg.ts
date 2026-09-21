@@ -67,20 +67,28 @@ let lastAttempt = 0
 /** Concurrent requests share one fetch rather than each pulling 8 MB. */
 let inFlight: Promise<IptvIndex | null> | null = null
 
-/** Test seam: drops the cached index so each case starts cold. */
-export function resetIptvCache(): void {
-  cached = null
-  lastAttempt = 0
-  inFlight = null
-}
-
-/**
- * Test seam: backdates the held copy (and the retry floor) by `byMs`, so the
- * staleness rules can be exercised without waiting hours.
+/*
+ * Test seams, absent in production. See the same block in accessJwt.ts: the
+ * registry is created by e2e/support/testSeams.ts before this module is
+ * evaluated, and by nothing in the deployed bundle, so no mutator of `cached`
+ * is exported from here.
  */
-export function ageIptvCacheForTest(byMs: number): void {
-  if (cached) cached.fetchedAt -= byMs
-  lastAttempt -= byMs
+{
+  const seams = (globalThis as { __streamloomTestSeams?: Record<string, unknown> })
+    .__streamloomTestSeams
+  if (seams) {
+    seams.resetIptvCache = () => {
+      cached = null
+      lastAttempt = 0
+      inFlight = null
+    }
+    // Backdates the held copy and the retry floor, so the staleness rules can be
+    // exercised without waiting hours.
+    seams.ageIptvCache = (byMs: number) => {
+      if (cached) cached.fetchedAt -= byMs
+      lastAttempt -= byMs
+    }
+  }
 }
 
 async function getJson(url: string, maxBytes: number): Promise<unknown | null> {
