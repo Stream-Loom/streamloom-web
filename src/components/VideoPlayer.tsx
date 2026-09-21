@@ -322,6 +322,17 @@ export function VideoPlayer({ channel, allChannels, returnTo = '/' }: Props) {
     }
   }, [])
 
+  // Leaving the player ends any pending auto-skip, including one still waiting on
+  // the connectivity check in failoverToNextAttempt.
+  const mountedRef = useRef(true)
+  useEffect(() => {
+    mountedRef.current = true
+    return () => {
+      mountedRef.current = false
+      cancelCountdown()
+    }
+  }, [cancelCountdown])
+
   useEffect(() => {
     function handleClickOutside(e: MouseEvent) {
       if (
@@ -726,7 +737,7 @@ export function VideoPlayer({ channel, allChannels, returnTo = '/' }: Props) {
       streams.length,
       () => failureEvidenceRef.current === evidence
     ).then(({ reachable }) => {
-      if (failureEvidenceRef.current !== evidence) return
+      if (!mountedRef.current || failureEvidenceRef.current !== evidence) return
       if (!reachable) {
         setNetworkIssue(true)
         return

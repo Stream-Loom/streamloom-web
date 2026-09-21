@@ -171,8 +171,7 @@ export function clearBrokenStreams() {
 const HIDDEN_CHANNELS_KEY = 'sl_hidden_channels_v1'
 let _cachedHiddenSet: Set<string> | null = null
 
-export function getHiddenSet(): Set<string> {
-  if (_cachedHiddenSet) return _cachedHiddenSet
+function readHiddenFromStorage(): Set<string> {
   let ids: string[] = []
   try {
     const parsed: unknown = JSON.parse(localStorage.getItem(HIDDEN_CHANNELS_KEY) ?? '[]')
@@ -180,9 +179,22 @@ export function getHiddenSet(): Set<string> {
   } catch {
     // unreadable value: treat as nothing hidden
   }
-  _cachedHiddenSet = new Set(ids)
+  return new Set(ids)
+}
+
+export function getHiddenSet(): Set<string> {
+  if (!_cachedHiddenSet) _cachedHiddenSet = readHiddenFromStorage()
   return _cachedHiddenSet
 }
+
+// Another tab changed the list: drop the cache so the next read sees it.
+try {
+  window.addEventListener('storage', (e) => {
+    if (e.key !== HIDDEN_CHANNELS_KEY) return
+    _cachedHiddenSet = null
+    notifyStreamStateChange()
+  })
+} catch {}
 
 function saveHiddenSet(set: Set<string>) {
   _cachedHiddenSet = set
@@ -198,16 +210,21 @@ export function isChannelHidden(channelId: string): boolean {
   return getHiddenSet().has(channelId)
 }
 
+// Read-modify-write starts from storage, not the cache, so a change made in
+// another tab is merged rather than overwritten.
 export function hideChannel(channelId: string) {
-  if (getHiddenSet().has(channelId)) return
-  saveHiddenSet(new Set(getHiddenSet()).add(channelId))
+  const current = readHiddenFromStorage()
+  if (current.has(channelId)) {
+    _cachedHiddenSet = current
+    return
+  }
+  saveHiddenSet(current.add(channelId))
 }
 
 export function unhideChannel(channelId: string) {
-  if (!getHiddenSet().has(channelId)) return
-  const next = new Set(getHiddenSet())
-  next.delete(channelId)
-  saveHiddenSet(next)
+  const current = readHiddenFromStorage()
+  if (!current.delete(channelId)) return
+  saveHiddenSet(current)
 }
 
 export function clearHiddenChannels() {

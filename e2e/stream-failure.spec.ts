@@ -188,6 +188,25 @@ test.describe('hiding a channel voluntarily', () => {
   })
 })
 
+test.describe('hidden channels across tabs', () => {
+  test('a hide made in one tab is merged, not overwritten, by a hide in another', async ({ context }) => {
+    await installUpstashMock(context, { totalChannels: 20, guideChannels: 10 })
+    const tabA = await context.newPage()
+    const tabB = await context.newPage()
+    await tabA.goto('/')
+    await tabB.goto('/')
+    const hide = (id: string) => `import('/src/util/stream.ts').then((m) => m.hideChannel('${id}'))`
+
+    // Tab B has read the (empty) list before tab A writes, so its cache is stale.
+    await tabB.evaluate(`import('/src/util/stream.ts').then((m) => m.getHiddenSet().size)`)
+    await tabA.evaluate(hide('ch1.xx'))
+    await tabB.evaluate(hide('ch2.xx'))
+
+    const stored = await tabA.evaluate(() => JSON.parse(localStorage.getItem('sl_hidden_channels_v1') ?? '[]'))
+    expect([...stored].sort()).toEqual(['ch1.xx', 'ch2.xx'])
+  })
+})
+
 test.describe('defaults and migration', () => {
   test('a fresh profile has hide-broken and auto-skip off', async ({ page, context }) => {
     await installUpstashMock(context, { totalChannels: 20, guideChannels: 10 })
