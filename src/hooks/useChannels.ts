@@ -23,6 +23,7 @@ import {
   fetchEdgeVerifiedStreams,
   fetchKnownStreams,
   getBrokenSet,
+  getHiddenSet,
   getWorkingMapSnapshot,
   isHideBrokenStreamsEnabled,
   onStreamStateChange,
@@ -438,9 +439,11 @@ export function useChannels(): UseChannelsResult {
 
   const raw = _channels ?? []
   const hideBroken = isHideBrokenStreamsEnabled()
-  const brokenSet = getBrokenSet()
-  const filtered = hideBroken && brokenSet.size > 0
-    ? raw.filter((c) => !brokenSet.has(c.id))
+  const brokenSet = hideBroken ? getBrokenSet() : null
+  const hiddenSet = getHiddenSet()
+  // Broken marks hide only while the setting is on; a channel the user hid stays hidden.
+  const filtered = (brokenSet && brokenSet.size > 0) || hiddenSet.size > 0
+    ? raw.filter((c) => !hiddenSet.has(c.id) && !brokenSet?.has(c.id))
     : raw
 
   return {

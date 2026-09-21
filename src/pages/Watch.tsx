@@ -2,7 +2,7 @@ import { useParams, useNavigate, useLocation } from 'react-router-dom'
 import { useMemo } from 'react'
 import { useChannels } from '../hooks/useChannels'
 import type { EnrichedChannel } from '../hooks/useChannels'
-import { isHideBrokenStreamsEnabled, isStreamBroken } from '../util/stream'
+import { isChannelHidden, isHideBrokenStreamsEnabled, isStreamBroken } from '../util/stream'
 import { VideoPlayer } from '../components/VideoPlayer'
 
 export function Watch() {
@@ -54,19 +54,19 @@ export function Watch() {
   // Preserve the exact list and order from the screen the user came from
   const orderedPlaylist = useMemo(() => {
     const hideBroken = isHideBrokenStreamsEnabled()
+    // The channel being watched always stays in its own playlist.
+    const listed = (c: EnrichedChannel) =>
+      c.id === channel?.id || (!isChannelHidden(c.id) && (!hideBroken || !isStreamBroken(c.id)))
     if (playlistIds && Array.isArray(playlistIds) && playlistIds.length > 1) {
       const list = playlistIds
         .map((id) => channelMap.get(id))
-        .filter(
-          (c): c is EnrichedChannel =>
-            Boolean(c?.stream && (!hideBroken || c.id === channel?.id || !isStreamBroken(c.id)))
-        )
+        .filter((c): c is EnrichedChannel => Boolean(c?.stream && listed(c)))
       if (list.length > 1 && channel && list.some((c) => c.id === channel.id)) {
         return list
       }
     }
     const fullList = (allChannels && allChannels.length > 0 ? allChannels : channels).filter((c) => c.stream)
-    const baseList = hideBroken ? fullList.filter((c) => !isStreamBroken(c.id) || c.id === channel?.id) : fullList
+    const baseList = fullList.filter(listed)
     if (channel && !baseList.some((c) => c.id === channel.id)) {
       return [channel, ...baseList]
     }

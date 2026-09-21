@@ -164,6 +164,56 @@ export function clearBrokenStreams() {
   }
 }
 
+// ---- User-hidden channels ----
+// A channel the user chose to hide. Unlike a broken mark this is an explicit
+// choice, so it never expires, is not touched by the broken-mark purge or the
+// cache reset, and applies whether or not "hide failed channels" is on.
+const HIDDEN_CHANNELS_KEY = 'sl_hidden_channels_v1'
+let _cachedHiddenSet: Set<string> | null = null
+
+export function getHiddenSet(): Set<string> {
+  if (_cachedHiddenSet) return _cachedHiddenSet
+  let ids: string[] = []
+  try {
+    const parsed: unknown = JSON.parse(localStorage.getItem(HIDDEN_CHANNELS_KEY) ?? '[]')
+    if (Array.isArray(parsed)) ids = parsed.filter((id): id is string => typeof id === 'string')
+  } catch {
+    // unreadable value: treat as nothing hidden
+  }
+  _cachedHiddenSet = new Set(ids)
+  return _cachedHiddenSet
+}
+
+function saveHiddenSet(set: Set<string>) {
+  _cachedHiddenSet = set
+  try {
+    localStorage.setItem(HIDDEN_CHANNELS_KEY, JSON.stringify([...set]))
+  } catch {
+    // ignore quota: stays hidden for this session
+  }
+  notifyStreamStateChange()
+}
+
+export function isChannelHidden(channelId: string): boolean {
+  return getHiddenSet().has(channelId)
+}
+
+export function hideChannel(channelId: string) {
+  if (getHiddenSet().has(channelId)) return
+  saveHiddenSet(new Set(getHiddenSet()).add(channelId))
+}
+
+export function unhideChannel(channelId: string) {
+  if (!getHiddenSet().has(channelId)) return
+  const next = new Set(getHiddenSet())
+  next.delete(channelId)
+  saveHiddenSet(next)
+}
+
+export function clearHiddenChannels() {
+  saveHiddenSet(new Set())
+}
+
 // ---- Verified Working Streams Cache ----
 const WORKING_STREAMS_KEY = 'sl_working_streams_v1'
 const WORKING_TTL_MS = 7 * 24 * 60 * 60 * 1000 // 7 days

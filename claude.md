@@ -101,7 +101,8 @@ streamloom-web/
 - `VideoPlayer.tsx` classifies every failed attempt (`src/util/streamFailure.ts`): `stream` (origin 4xx/5xx except 408/425/429, manifest/level/frag parse, codec, native decode/unsupported), `network` (no response), `inconclusive` (timeouts, the 7s/8s watchdogs, aborts, unknown).
 - On exhaustion, `recordStreamFailure()` calls `markStreamBroken` only when `navigator.onLine`, a same-origin probe (`/favicon.svg?probe=`) succeeds, and **every** candidate's last attempt was `stream`. Auto-skip also requires the probe to pass.
 - Never call `markStreamBroken` from a player error path directly. Marks written before this rule are purged once (`sl_broken_reset_v1`).
-- `e2e/stream-failure.spec.ts` covers offline, probe failure, timeout, origin 404, defaults and migration.
+- Hangs are never marked, so the user can hide a channel themselves (player HUD 🚫, slow-connecting and error overlays). `sl_hidden_channels_v1` holds their choice: no TTL, applies regardless of hide-broken, untouched by the mark purge and cache reset, undone per channel or all at once in Settings → Hidden Channels. It filters `channels` in `useChannels` and the playlists in `Watch.tsx`.
+- `e2e/stream-failure.spec.ts` covers offline, probe failure, timeout, origin 404, voluntary hide, defaults and migration.
 
 ### 3. Startup & Channel-Switch Latency
 - HLS runs with `enableWorker: false` — worker spawn costs 100–300 ms on low-end TV browsers while the parse work is negligible.

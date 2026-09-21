@@ -116,6 +116,41 @@
   font-size: 0.8rem;
 }
 
+.settings-item--stacked {
+  flex-direction: column;
+  align-items: stretch;
+}
+
+.settings-item__row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.settings-hidden-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  max-height: 240px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.settings-hidden-list__item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 6px 4px 6px 12px;
+  border-radius: var(--radius-full);
+  background: var(--bg-card);
+  border: 1px solid var(--border-subtle);
+  font-size: 0.85rem;
+}
+
 .settings-badge-row {
   display: flex;
   flex-wrap: wrap;

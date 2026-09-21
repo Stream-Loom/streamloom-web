@@ -127,6 +127,67 @@ test.describe('failed play never hides a channel by itself', () => {
   })
 })
 
+test.describe('hiding a channel voluntarily', () => {
+  test('hides from every list regardless of hide-broken, survives reload, and can be restored', async ({
+    page,
+    context,
+  }) => {
+    await openHome(page, context)
+
+    // A stream that hangs, which failure classification deliberately never marks.
+    await page.route(STREAM, () => {})
+    await page.route(/\/api\/proxy/, () => {})
+    await go(page, `/watch/${CHANNEL}`)
+    await waitForFailureScreen(page)
+    expect(await brokenIds(page)).toEqual([])
+
+    await page.getByRole('button', { name: 'Hide this channel' }).first().click()
+    await expect(page).toHaveURL(/\/watch\/(?!ch1\.xx)/)
+
+    // hide-broken is at its default (off): the hide is the user's, so it still applies.
+    expect(await page.evaluate(() => localStorage.getItem('sl_hide_broken'))).toBeNull()
+    await go(page, '/')
+    await expect(page.getByRole('button', { name: 'Play Channel 0', exact: true }).first()).toBeVisible()
+    await expect(page.getByRole('button', { name: `Play ${CHANNEL_NAME}`, exact: true })).toHaveCount(0)
+
+    await page.reload()
+    await expect(page.getByRole('button', { name: 'Play Channel 0', exact: true }).first()).toBeVisible({
+      timeout: 60_000,
+    })
+    await expect(page.getByRole('button', { name: `Play ${CHANNEL_NAME}`, exact: true })).toHaveCount(0)
+
+    // Listed by name in Settings, where it can be restored.
+    await go(page, '/settings')
+    const hidden = page.locator('.settings-hidden-list__item', { hasText: CHANNEL_NAME })
+    await expect(hidden).toBeVisible()
+    await page.getByRole('button', { name: `Restore ${CHANNEL_NAME}` }).click()
+    await expect(hidden).toHaveCount(0)
+
+    await go(page, '/')
+    await expect(page.getByRole('button', { name: `Play ${CHANNEL_NAME}`, exact: true }).first()).toBeVisible()
+  })
+
+  test('a hidden channel is loaded from storage and cleared only by Restore All', async ({ page, context }) => {
+    await installUpstashMock(context, { totalChannels: 20, guideChannels: 10 })
+    await page.addInitScript(() => {
+      if (sessionStorage.getItem('seeded')) return
+      sessionStorage.setItem('seeded', '1')
+      localStorage.setItem('sl_hidden_channels_v1', JSON.stringify(['ch1.xx']))
+    })
+    await page.goto('/')
+    await expect(page.getByRole('button', { name: 'Play Channel 0', exact: true }).first()).toBeVisible({
+      timeout: 60_000,
+    })
+    await expect(page.getByRole('button', { name: `Play ${CHANNEL_NAME}`, exact: true })).toHaveCount(0)
+
+    await go(page, '/settings')
+    await expect(page.getByRole('button', { name: `Restore ${CHANNEL_NAME}` })).toBeVisible()
+    await page.getByRole('button', { name: 'Restore All' }).click()
+    await expect(page.locator('.settings-hidden-list__item')).toHaveCount(0)
+    expect(await page.evaluate(() => localStorage.getItem('sl_hidden_channels_v1'))).toBe('[]')
+  })
+})
+
 test.describe('defaults and migration', () => {
   test('a fresh profile has hide-broken and auto-skip off', async ({ page, context }) => {
     await installUpstashMock(context, { totalChannels: 20, guideChannels: 10 })

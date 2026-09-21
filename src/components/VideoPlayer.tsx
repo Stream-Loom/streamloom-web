@@ -16,6 +16,7 @@ import {
   cacheWorkingStream,
   fetchEdgeVerifiedStreams,
   isAutoSkipEnabled,
+  hideChannel,
 } from '../util/stream'
 import {
   classifyHlsError,
@@ -528,6 +529,22 @@ export function VideoPlayer({ channel, allChannels, returnTo = '/' }: Props) {
     ;(document.activeElement as HTMLElement)?.blur?.()
     navigate(returnTo, { state: { targetChannelId: channel.id } })
   }, [cancelCountdown, channel.id, returnTo, navigate])
+
+  // The user's own choice to drop this channel from every list; undone in Settings.
+  const handleHideChannel = useCallback(() => {
+    cancelCountdown()
+    const current = channelRef.current
+    const playlist = allChannelsRef.current
+    const pos = playlist.findIndex((c) => c.id === current.id)
+    const next = playlist.length > 1 ? playlist[(pos + 1) % playlist.length] : null
+    hideChannel(current.id)
+    if (next && next.id !== current.id) {
+      showToast(`${current.name} hidden · restore it in Settings`, 3500)
+      switchChannelCleanly(next)
+    } else {
+      handleBack()
+    }
+  }, [cancelCountdown, showToast, switchChannelCleanly, handleBack])
 
   const targetChannelIdRef = useRef(channel.id)
 
@@ -1304,6 +1321,15 @@ export function VideoPlayer({ channel, allChannels, returnTo = '/' }: Props) {
                 Retry ↺
               </button>
             )}
+            {isSlowConnecting && (
+              <button
+                className="player__overlay-btn"
+                onClick={handleHideChannel}
+                aria-label="Hide this channel"
+              >
+                Hide Channel 🚫
+              </button>
+            )}
             <button
               className="player__overlay-btn player__overlay-btn--back"
               onClick={handleBack}
@@ -1365,6 +1391,13 @@ export function VideoPlayer({ channel, allChannels, returnTo = '/' }: Props) {
                 Alternate Stream ({activeStreamIdx + 1}/{channelStreams.length})
               </button>
             )}
+            <button
+              className="player__overlay-btn"
+              onClick={handleHideChannel}
+              aria-label="Hide this channel"
+            >
+              Hide Channel 🚫
+            </button>
             {nextChannel && (
               <button
                 className="player__overlay-btn player__overlay-btn--skip"
@@ -1443,6 +1476,14 @@ export function VideoPlayer({ channel, allChannels, returnTo = '/' }: Props) {
             aria-label={fav ? 'Remove from favourites' : 'Add to favourites'}
           >
             {fav ? '♥' : '♡'}
+          </button>
+          <button
+            className="player__fav-btn"
+            onClick={handleHideChannel}
+            aria-label="Hide this channel"
+            title="Hide this channel (restore in Settings)"
+          >
+            🚫
           </button>
         </div>
       </div>
