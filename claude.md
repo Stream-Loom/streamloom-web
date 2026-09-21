@@ -101,6 +101,13 @@ streamloom-web/
 - `testBandwidth: false` plus `startFragPrefetch` and `abrEwmaDefaultEstimate: 5 Mbps` avoid an ABR ramp-up from low quality on fast connections.
 - `VideoPlayer.tsx` warms the next channel's resolved manifest with a `priority: 'low'` fetch 1.5 s after playback starts, so the browser and edge cache are primed before the user switches.
 
+### 4. Redis Read Budget
+- **Rule**: every Upstash read is metered, and the read-only token is public. Read only what is on screen, and never re-download what has not changed.
+- The catalogue is compared by generation first: `loadData` reads `catalogue:meta` (`fetchCatalogueMeta`, one GET, concurrent callers share it) and skips the download when the stored generation matches. The stored record carries its `generation`; the worker receives the `meta` already read, so it does not read it again.
+- The guide (`EpgGuide.tsx`) fetches schedules only for rows in or just beyond the viewport, after scrolling settles. Never re-introduce a timer that prefetches every guide channel.
+- Schedules are persisted in the `schedules` object store of the same IndexedDB (`catalogueStore.ts`), keyed by `<generation>:<channelId>`, and read by `scheduleLoader.ts` before Redis. An entry expires when every programme has ended or the generation changes; a write also drops other generations.
+- `e2e/guide-requests.spec.ts` counts reads against an in-process Upstash mock (`e2e/support/upstashMock.ts`) and fails on a regression. Do not use `MGET` until it is confirmed to bill as one command.
+
 ### 3. Keyboard & Smart TV Navigation
 - Navigation uses a single stable listener pattern with `onKeyRef` in `VideoPlayer.tsx` to ensure zero dropped keypresses.
 - Keys:

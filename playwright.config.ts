@@ -1,4 +1,20 @@
 import { defineConfig, devices } from '@playwright/test'
+import { loadEnv } from 'vite'
+
+/**
+ * Placeholder Upstash settings for the dev server, used only when none are
+ * configured (a fresh checkout or worktree has no .env). Specs that mock the
+ * endpoint (e2e/guide-requests.spec.ts) then still run; specs that read the real
+ * catalogue need real credentials, as before. Real values always win.
+ */
+const configured = loadEnv('development', process.cwd(), 'VITE_')
+const upstashEnv =
+  configured.VITE_UPSTASH_REDIS_REST_URL && configured.VITE_UPSTASH_REDIS_REST_READONLY_TOKEN
+    ? {}
+    : {
+        VITE_UPSTASH_REDIS_REST_URL: 'https://upstash.mock.invalid',
+        VITE_UPSTASH_REDIS_REST_READONLY_TOKEN: 'mock-readonly-token',
+      }
 
 /**
  * Browser tests for the TV guide.
@@ -31,5 +47,6 @@ export default defineConfig({
     url: 'http://127.0.0.1:5199',
     reuseExistingServer: true,
     timeout: 120_000,
+    env: upstashEnv,
   },
 })

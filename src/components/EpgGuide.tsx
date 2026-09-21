@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import type { Category, EnrichedChannel, EpgProgram } from '../api/types'
-import { fetchEpgFromRedis } from '../api/redis'
+import { fetchEpgFromRedis, resolveGeneration } from '../api/redis'
+import { persistSchedules, readPersistedSchedules } from '../util/scheduleLoader'
 import {
   PIXELS_PER_MINUTE,
   ROW_HEIGHT,
@@ -53,17 +54,33 @@ const STALE_THRESHOLD_MS = 30 * 60 * 1000
 const FETCH_CONCURRENCY = 12
 
 /**
+ * Rows whose schedules are fetched beyond the viewport: enough that a normal
+ * scroll step lands on rows that are already loaded, and no more. Every read is
+ * metered, so the guide reads what is on screen (plus this margin), not the list.
+ */
+const PREFETCH_AHEAD_ROWS = 12
+/** Covers the virtualizer's overscan above the viewport, which renders rows too. */
+const PREFETCH_BEHIND_ROWS = 6
+
+/** How long scrolling must pause before the rows it stopped on are fetched. */
+const PREFETCH_SETTLE_MS = 150
+
+/**
  * Module-level EPG cache.
  *
- * Shared with the Watch page's `useEpg`, so moving between guide and player
- * never refetches a schedule, and the row list stays referentially stable while
- * a fetch is in flight.
+ * Keeps the row list referentially stable while a fetch is in flight. Schedules
+ * that were read once are also persisted in IndexedDB (see scheduleLoader.ts), so
+ * neither a reload nor the Watch page's `useEpg` re-reads them from Redis.
  *
- * Capped: a full guide can touch thousands of channels and each schedule is a
- * day of programmes, so entries are evicted oldest-first once the cap is hit.
+ * Capped: a scroll through a long guide can touch thousands of channels and each
+ * schedule is a day of programmes, so entries are evicted oldest-first once the
+ * cap is hit.
  */
 const EPG_CACHE_LIMIT = 1500
 const epgCache = new Map<string, EpgProgram[]>()
+
+/** Generation `epgCache` was filled from; a newer publish invalidates it. */
+let epgCacheGeneration: number | null = null
 
 function cacheEpg(channelId: string, programs: EpgProgram[]) {
   epgCache.set(channelId, programs)
@@ -98,11 +115,10 @@ function isCoolingDown(channelId: string): boolean {
   return false
 }
 
-async function loadEpg(channelId: string): Promise<EpgProgram[]> {
-  const cached = epgCache.get(channelId)
-  if (cached) return cached
+/** Reads one schedule from Redis, pinned to the generation the caller keys storage by. */
+async function loadEpg(channelId: string, generation: number): Promise<EpgProgram[]> {
   try {
-    const data = await fetchEpgFromRedis(channelId)
+    const data = await fetchEpgFromRedis(channelId, generation)
     if (data.length > 0) {
       emptyRetryAt.delete(channelId)
       cacheEpg(channelId, data)
@@ -120,23 +136,46 @@ async function loadEpg(channelId: string): Promise<EpgProgram[]> {
 
 // ---- Program loading state ----
 
-/** Channels whose schedule request is already in flight. */
-const inflight = new Set<string>()
+/** Channels whose schedule is queued or in flight, so overlapping passes never repeat a read. */
+const pending = new Set<string>()
 
 /** Stable empty list so rows without a schedule keep one prop identity. */
 const EMPTY_PROGRAMS: EpgProgram[] = []
 
-/** Requests schedules for `ids`, at most FETCH_CONCURRENCY at a time.
+/** Lets the caller withdraw a pass whose rows are no longer on screen. */
+interface PrefetchPass {
+  cancelled: boolean
+}
+
+/**
+ * Loads schedules for `ids`: from IndexedDB where stored, otherwise from Redis at
+ * most FETCH_CONCURRENCY at a time, then stores what Redis returned.
  *
  * Notifications are coalesced per animation frame: a screenful of schedules
  * arrives as dozens of separate awaits, and repainting per channel would cost
  * one render each instead of one render for the whole wave.
  */
-function prefetchEpg(ids: string[], onLoaded: () => void) {
-  const missing = ids.filter((id) => !epgCache.has(id) && !inflight.has(id) && !isCoolingDown(id))
-  if (missing.length === 0) return
+async function prefetchEpg(ids: string[], onLoaded: () => void, pass: PrefetchPass) {
+  const generation = await resolveGeneration()
+  if (generation === null) {
+    // The generation pointer could not be read, so no schedule can be. Cool the
+    // rows down rather than re-reading the pointer on every scroll step.
+    for (const id of ids) emptyRetryAt.set(id, Date.now() + EMPTY_RETRY_MS)
+    return
+  }
+  if (epgCacheGeneration !== generation) {
+    // A new generation replaced the one these schedules came from.
+    const replaced = epgCacheGeneration !== null
+    epgCache.clear()
+    emptyRetryAt.clear()
+    epgCacheGeneration = generation
+    if (replaced) onLoaded()
+  }
 
-  let index = 0
+  const missing = ids.filter((id) => !epgCache.has(id) && !pending.has(id) && !isCoolingDown(id))
+  if (missing.length === 0 || pass.cancelled) return
+  for (const id of missing) pending.add(id)
+
   let pendingNotify = false
   const scheduleNotify = () => {
     if (pendingNotify) return
@@ -148,20 +187,28 @@ function prefetchEpg(ids: string[], onLoaded: () => void) {
     })
   }
 
-  const workers = Array.from({ length: Math.min(FETCH_CONCURRENCY, missing.length) }, async () => {
-    while (index < missing.length) {
-      const id = missing[index]
-      index += 1
-      inflight.add(id)
-      try {
-        await loadEpg(id)
-      } finally {
-        inflight.delete(id)
+  try {
+    const stored = await readPersistedSchedules(generation, missing)
+    for (const [id, programs] of stored) cacheEpg(id, programs)
+    if (stored.size > 0) scheduleNotify()
+
+    const toFetch = missing.filter((id) => !stored.has(id))
+    const fetched: [string, EpgProgram[]][] = []
+    let index = 0
+    const workers = Array.from({ length: Math.min(FETCH_CONCURRENCY, toFetch.length) }, async () => {
+      while (index < toFetch.length && !pass.cancelled) {
+        const id = toFetch[index]
+        index += 1
+        const programs = await loadEpg(id, generation)
+        if (programs.length > 0) fetched.push([id, programs])
+        scheduleNotify()
       }
-      scheduleNotify()
-    }
-  })
-  void Promise.all(workers)
+    })
+    await Promise.all(workers)
+    if (fetched.length > 0) await persistSchedules(generation, fetched)
+  } finally {
+    for (const id of missing) pending.delete(id)
+  }
 }
 
 /** Sidebar width and row height per breakpoint.
@@ -307,19 +354,34 @@ export function EpgGuide({
   // Ids only: the prefetch effect must not restart when the search text changes
   // but the matching set is identical.
   const guideKey = useMemo(() => guideChannels.map((c) => c.id).join('\u0000'), [guideChannels])
-  const guideIdsRef = useRef<string[]>([])
 
-  // Prefetch the first screens' worth of schedules immediately, then the rest in
-  // the background so scrolling into new rows never waits on the network.
+  // Rows whose schedules are wanted: those in the viewport plus a small margin
+  // either side. Deliberately not the whole list; every schedule is one metered
+  // read, and rows scrolled into view later fetch on arrival.
+  const prefetchFirst = Math.max(0, Math.floor(scrollTop / rowHeight) - PREFETCH_BEHIND_ROWS)
+  const prefetchLast = Math.min(
+    guideChannels.length,
+    Math.ceil((scrollTop + viewportH) / rowHeight) + PREFETCH_AHEAD_ROWS,
+  )
+  const hasPrefetchedRef = useRef(false)
+
   useEffect(() => {
-    guideIdsRef.current = guideChannels.map((c) => c.id)
-    if (schedulesUnavailable || guideIdsRef.current.length === 0) return
-    const firstScreen = Math.ceil(viewportH / rowHeight) + 12
-    prefetchEpg(guideIdsRef.current.slice(0, firstScreen), bumpCache)
-    const timer = setTimeout(() => prefetchEpg(guideIdsRef.current, bumpCache), 400)
-    return () => clearTimeout(timer)
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- keyed on the id set
-  }, [guideKey, viewportH, rowHeight, bumpCache, schedulesUnavailable])
+    if (schedulesUnavailable || guideChannels.length === 0) return
+    const ids = guideChannels.slice(prefetchFirst, prefetchLast).map((c) => c.id)
+    const pass: PrefetchPass = { cancelled: false }
+    // The first screen goes out at once. After that a fling through the list
+    // would fetch every row it passes, so wait for the scroll to settle.
+    const delay = hasPrefetchedRef.current ? PREFETCH_SETTLE_MS : 0
+    const timer = setTimeout(() => {
+      hasPrefetchedRef.current = true
+      void prefetchEpg(ids, bumpCache, pass)
+    }, delay)
+    return () => {
+      clearTimeout(timer)
+      pass.cancelled = true
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- keyed on the id set and row window
+  }, [guideKey, prefetchFirst, prefetchLast, bumpCache, schedulesUnavailable])
 
   // Vertical virtualization: only rows intersecting the viewport are rendered.
   const totalHeight = guideChannels.length * rowHeight

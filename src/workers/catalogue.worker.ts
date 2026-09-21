@@ -8,6 +8,7 @@
  */
 
 import { fetchCatalogueFromRedis, fetchEpgIdsFromRedis } from '../api/redis'
+import type { CatalogueGeneration } from '../api/redis'
 import { enrichChannels } from '../util/enrich'
 import type { WorkingRecord } from '../util/enrich'
 import { buildSearchIndex, type SearchIndex } from '../util/searchText'
@@ -15,6 +16,8 @@ import type { Category, EnrichedChannel } from '../api/types'
 
 export interface CatalogueWorkerRequest {
   working: Record<string, WorkingRecord>
+  /** The generation the caller already read and chose to download; saves a second `meta` read. */
+  meta: CatalogueGeneration
 }
 
 export interface CatalogueWorkerResponse {
@@ -37,7 +40,7 @@ ctx.onmessage = async (event: MessageEvent<CatalogueWorkerRequest>) => {
   const working = event.data.working ?? {}
 
   try {
-    const catalogue = await fetchCatalogueFromRedis()
+    const catalogue = await fetchCatalogueFromRedis(event.data.meta)
 
     if (!catalogue) {
       ctx.postMessage({

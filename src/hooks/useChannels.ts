@@ -2,10 +2,12 @@ import { useEffect, useState, useCallback } from 'react'
 import type { Category, EnrichedChannel, EpgProgram } from '../api/types'
 import {
   fetchCatalogueFromRedis,
-  fetchEpgFromRedis,
+  fetchCatalogueMeta,
   fetchEpgIdsFromRedis,
   isUpstashConfigured,
 } from '../api/redis'
+import type { CatalogueGeneration } from '../api/redis'
+import { loadSchedule } from '../util/scheduleLoader'
 import { enrichChannels } from '../util/enrich'
 import { buildSearchIndex, setSearchIndex as installSearchIndex, type SearchIndex } from '../util/searchText'
 import {
@@ -46,6 +48,8 @@ interface UseChannelsResult {
 }
 
 interface CatalogueLoad {
+  /** Generation the catalogue was read from. */
+  generation: number
   channels: EnrichedChannel[]
   categories: Category[]
   /** Null when the schedule index could not be read. */
@@ -59,6 +63,8 @@ let _channels: EnrichedChannel[] | null = null
 let _categories: Category[] | null = null
 let _epgIds: Set<string> | null = null
 let _epgAvailable = false
+/** Generation of the catalogue held in `_channels`; null when unknown (e.g. a record from before generations were stored). */
+let _generation: number | null = null
 let _loading = true
 let _error: string | null = null
 let _source: 'redis' | 'cache' | null = null
@@ -79,7 +85,7 @@ const WORKER_TIMEOUT_MS = 25_000
  * stay off the main thread. Resolves undefined when no worker can be used, which
  * tells the caller to fall back to the main thread.
  */
-function loadInWorker(): Promise<CatalogueLoad | null | undefined> {
+function loadInWorker(meta: CatalogueGeneration): Promise<CatalogueLoad | null | undefined> {
   return new Promise((resolve) => {
     if (typeof Worker === 'undefined') {
       resolve(undefined)
@@ -111,6 +117,7 @@ function loadInWorker(): Promise<CatalogueLoad | null | undefined> {
       const data = event.data
       if (data && data.ok) {
         finish({
+          generation: meta.generation,
           channels: data.channels,
           categories: data.categories,
           epgIds: data.epgIds,
@@ -122,33 +129,35 @@ function loadInWorker(): Promise<CatalogueLoad | null | undefined> {
     }
     worker.onerror = () => finish(undefined)
 
-    const request: CatalogueWorkerRequest = { working: getWorkingMapSnapshot() }
+    const request: CatalogueWorkerRequest = { working: getWorkingMapSnapshot(), meta }
     worker.postMessage(request)
   })
 }
 
 /** Fallback for environments without workers: identical work, main thread. */
-async function loadOnMainThread(): Promise<CatalogueLoad | null> {
-  const catalogue = await fetchCatalogueFromRedis()
+async function loadOnMainThread(meta: CatalogueGeneration): Promise<CatalogueLoad | null> {
+  const catalogue = await fetchCatalogueFromRedis(meta)
   if (!catalogue) return null
   const epgIds = await fetchEpgIdsFromRedis()
   return {
+    generation: catalogue.generation,
     channels: enrichChannels(catalogue.channels, catalogue.streams, getWorkingMapSnapshot()),
     categories: catalogue.categories,
     epgIds,
   }
 }
 
-async function loadCatalogue(): Promise<CatalogueLoad | null> {
-  const fromWorker = await loadInWorker()
+async function loadCatalogue(meta: CatalogueGeneration): Promise<CatalogueLoad | null> {
+  const fromWorker = await loadInWorker(meta)
   if (fromWorker !== undefined) return fromWorker
-  return loadOnMainThread()
+  return loadOnMainThread(meta)
 }
 
 /** Applies a freshly loaded catalogue to the shared module state. */
 function applyLoad(load: CatalogueLoad, source: 'redis' | 'cache') {
   _channels = load.channels
   _categories = load.categories
+  _generation = load.generation
   if (load.epgIds) {
     _epgIds = new Set(load.epgIds)
     _epgAvailable = load.epgIds.length > 0
@@ -210,7 +219,8 @@ async function loadData(force = false) {
   if (!force && _channels) return
   cancelRetry()
 
-  // Instant path: IndexedDB first, then refresh from Redis in the background.
+  // Instant path: IndexedDB first. The generation check below then decides, with
+  // one small read, whether anything needs downloading.
   if (!force) {
     const stored = await readStoredCatalogue()
     if (stored) {
@@ -218,11 +228,12 @@ async function loadData(force = false) {
       _categories = stored.categories
       _epgIds = new Set(stored.epgIds)
       _epgAvailable = stored.epgIds.length > 0
+      _generation = stored.generation
       _source = 'cache'
       _loading = false
       _error = null
-      // Reuse the cache for the search index too; the background refresh
-      // below will rebuild and reinstall it.
+      // Reuse the cache for the search index too; a refresh that finds a new
+      // generation will rebuild and reinstall it.
       installSearchIndex(buildSearchIndex(stored.channels))
       notify()
       loadData(true).catch(() => {})
@@ -239,7 +250,23 @@ async function loadData(force = false) {
   }
 
   try {
-    const load = await loadCatalogue()
+    // One GET names the current generation. When it is the one already held, the
+    // catalogue is identical to what Redis would return and nothing is downloaded.
+    const meta = await fetchCatalogueMeta()
+
+    if (!meta) {
+      reportLoadFailure(
+        isUpstashConfigured ? 'catalogue has not been published' : 'data source is not configured',
+      )
+      return
+    }
+
+    if (_channels && _channels.length > 0 && _generation === meta.generation) {
+      await confirmUnchangedCatalogue()
+      return
+    }
+
+    const load = await loadCatalogue(meta)
 
     if (!load) {
       reportLoadFailure(
@@ -252,6 +279,7 @@ async function loadData(force = false) {
     notify()
 
     writeStoredCatalogue({
+      generation: load.generation,
       channels: load.channels,
       categories: load.categories,
       epgIds: load.epgIds ?? [...(_epgIds ?? [])],
@@ -259,6 +287,26 @@ async function loadData(force = false) {
   } catch (e) {
     reportLoadFailure((e as Error).message)
   }
+}
+
+/**
+ * Settles state after a check that found the held catalogue current.
+ *
+ * The schedule index belongs to the same generation, so it is only read again when
+ * the held copy has none (an earlier read of it failed), which is worth one GET.
+ */
+async function confirmUnchangedCatalogue() {
+  if ((_epgIds?.size ?? 0) === 0) {
+    const ids = await fetchEpgIdsFromRedis()
+    if (ids && ids.length > 0) {
+      _epgIds = new Set(ids)
+      _epgAvailable = true
+    }
+  }
+  _loading = false
+  _error = null
+  _retryAttempt = 0
+  notify()
 }
 
 let _epgRefresh: Promise<void> | null = null
@@ -416,6 +464,7 @@ export async function clearCatalogueCache() {
   _categories = null
   _epgIds = null
   _epgAvailable = false
+  _generation = null
   _source = null
 }
 
@@ -439,7 +488,7 @@ export function useEpg(channelId: string | null) {
     Promise.resolve().then(() => {
       if (!cancelled) setLoading(true)
     })
-    fetchEpgFromRedis(channelId)
+    loadSchedule(channelId)
       .then((data) => {
         if (!cancelled) {
           _epgCache.set(channelId, data)

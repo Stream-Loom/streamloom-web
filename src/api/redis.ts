@@ -78,27 +78,67 @@ interface CatalogueMeta {
   syncedAt?: string
 }
 
-async function readMeta(): Promise<(CatalogueMeta & { prefix: string }) | null> {
+/** The generation pointer, plus the key prefix every key of that generation shares. */
+export type CatalogueGeneration = CatalogueMeta & { prefix: string }
+
+function prefixFor(generation: number): string {
+  return 'catalogue:g' + generation
+}
+
+async function readMetaOnce(): Promise<CatalogueGeneration | null> {
   const raw = await redisGet('catalogue:meta')
   if (!raw) return null
   try {
     const meta: CatalogueMeta = JSON.parse(raw)
     if (meta.version !== SUPPORTED_VERSION || meta.generation < 0) return null
-    return { ...meta, prefix: 'catalogue:g' + meta.generation }
+    return { ...meta, prefix: prefixFor(meta.generation) }
   } catch {
     return null
   }
 }
 
-/** Generation prefix from the last catalogue load, reused for EPG reads. */
+/** Generation pointer of this JS context, remembered so EPG reads need no second `meta` read. */
 let _prefix: string | null = null
+let _generation: number | null = null
+let _metaInflight: Promise<CatalogueGeneration | null> | null = null
+
+/**
+ * Reads `catalogue:meta` (one GET) and remembers the generation it names.
+ *
+ * Concurrent callers share one request: a screenful of schedule reads starting at
+ * once must not each read the pointer first. Returns null when the pointer is
+ * missing, unreadable or of an unsupported version.
+ */
+export function fetchCatalogueMeta(): Promise<CatalogueGeneration | null> {
+  if (!isUpstashConfigured) return Promise.resolve(null)
+  if (_metaInflight) return _metaInflight
+  _metaInflight = readMetaOnce()
+    .then((meta) => {
+      if (meta) {
+        _prefix = meta.prefix
+        _generation = meta.generation
+      }
+      return meta
+    })
+    .finally(() => { _metaInflight = null })
+  return _metaInflight
+}
+
+/**
+ * The current generation, from memory when this context has already read it.
+ * `fresh` re-reads the pointer, for long-lived tabs whose remembered value may
+ * predate a newer publish.
+ */
+export async function resolveGeneration(fresh = false): Promise<number | null> {
+  if (_generation !== null && !fresh) return _generation
+  const meta = await fetchCatalogueMeta()
+  return meta ? meta.generation : null
+}
 
 async function resolvePrefix(fresh = false): Promise<string | null> {
   if (_prefix && !fresh) return _prefix
-  const meta = await readMeta()
-  if (!meta) return null
-  _prefix = meta.prefix
-  return _prefix
+  const meta = await fetchCatalogueMeta()
+  return meta ? meta.prefix : null
 }
 
 /** Reads multiple pages of a resource concurrently and concatenates them. */
@@ -132,6 +172,7 @@ async function readSingle<T>(prefix: string, resource: string): Promise<T[] | nu
 // ---- Public catalogue fetchers ----
 
 export interface CatalogueFromRedis {
+  generation: number
   channels: Channel[]
   streams: Stream[]
   categories: Category[]
@@ -142,12 +183,18 @@ export interface CatalogueFromRedis {
  *
  * Pages are read concurrently, so wall time is the slowest single page rather
  * than the sum of every page. Returns null on any miss or budget expiry.
+ *
+ * `meta` is the generation the caller has already read (and compared against what
+ * it holds); passing it avoids a second `catalogue:meta` GET and guarantees every
+ * page comes from the generation that was checked.
  */
-export async function fetchCatalogueFromRedis(): Promise<CatalogueFromRedis | null> {
+export async function fetchCatalogueFromRedis(
+  known?: CatalogueGeneration,
+): Promise<CatalogueFromRedis | null> {
   if (!isUpstashConfigured) return null
 
   return withBudget(async () => {
-    const meta = await readMeta()
+    const meta = known ?? (await fetchCatalogueMeta())
     if (!meta) return null
 
     const [channels, streams, categories] = await Promise.all([
@@ -159,7 +206,8 @@ export async function fetchCatalogueFromRedis(): Promise<CatalogueFromRedis | nu
     if (!channels || !streams || !categories) return null
 
     _prefix = meta.prefix
-    return { channels, streams, categories }
+    _generation = meta.generation
+    return { generation: meta.generation, channels, streams, categories }
   })
 }
 
@@ -184,9 +232,14 @@ export async function fetchEpgIdsFromRedis(fresh = false): Promise<string[] | nu
   }
 }
 
-/** Schedule for a single channel, read on demand from the current generation. */
-export async function fetchEpgFromRedis(channelId: string): Promise<EpgProgram[]> {
-  const prefix = await resolvePrefix()
+/**
+ * Schedule for a single channel, read on demand.
+ *
+ * `generation` pins the read to the generation the caller keys its own storage
+ * by; without it the current generation is used.
+ */
+export async function fetchEpgFromRedis(channelId: string, generation?: number): Promise<EpgProgram[]> {
+  const prefix = generation !== undefined ? prefixFor(generation) : await resolvePrefix()
   if (!prefix) return []
   const raw = await redisGet(prefix + ':epg:' + channelId)
   if (!raw) return []
