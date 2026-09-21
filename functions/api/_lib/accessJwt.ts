@@ -43,6 +43,16 @@ export interface AccessConfig {
   auds: string[]
   /** Where the team publishes its signing keys. */
   certsUrl: string
+  /**
+   * Optional second gate: when `CF_ACCESS_ALLOWED_EMAILS` is set, the verified
+   * `email` claim must be one of these (lowercased, exact match). Empty when the
+   * variable is unset, which leaves the Access policy as the only allow-list.
+   *
+   * Defence in depth, not a replacement: it means a policy widened by accident —
+   * an extra rule, a group that grew, a second identity provider attached to the
+   * application — does not by itself become permission to publish.
+   */
+  allowedEmails: string[]
 }
 
 /** Who the token says is calling. Only ever produced after a full verification. */
@@ -101,8 +111,14 @@ const AUD_RE = /^[A-Za-z0-9_-]{20,200}$/
 /** Ceiling on how many applications may publish to this route. */
 const MAX_AUDS = 4
 
+/** Ceiling on the optional email allow-list. It is one author (ADR-0033). */
+const MAX_ALLOWED_EMAILS = 10
+
 const isRecord = (v: unknown): v is Record<string, unknown> =>
   typeof v === 'object' && v !== null && !Array.isArray(v)
+
+/** True when a string carries any whitespace. Written without a regex escape. */
+const hasSpace = (value: string): boolean => value.split('').some((c) => c.trim().length === 0)
 
 /**
  * The Access settings, or null when they are unusable.
@@ -131,8 +147,24 @@ export function readAccessConfig(env: unknown): AccessConfig | null {
   host = host.replace(/\/+$/, '')
   if (!TEAM_DOMAIN_RE.test(host)) return null
 
+  // Optional. Absent or blank leaves the list empty, which means "no second gate"
+  // and is the behaviour before this variable existed. A value that is present but
+  // unusable (every entry malformed, or too many) fails the configuration closed
+  // rather than being silently ignored — a typo here must not widen access.
+  const rawEmails = typeof e.CF_ACCESS_ALLOWED_EMAILS === 'string' ? e.CF_ACCESS_ALLOWED_EMAILS.trim() : ''
+  let allowedEmails: string[] = []
+  if (rawEmails.length > 0) {
+    const entries = rawEmails
+      .split(',')
+      .map((entry) => entry.trim().toLowerCase())
+      .filter((entry) => entry.length > 0)
+    if (entries.length === 0 || entries.length > MAX_ALLOWED_EMAILS) return null
+    if (!entries.every((entry) => entry.length <= 320 && entry.includes('@') && !hasSpace(entry))) return null
+    allowedEmails = [...new Set(entries)]
+  }
+
   const teamDomain = 'https://' + host
-  return { teamDomain, auds, certsUrl: teamDomain + '/cdn-cgi/access/certs' }
+  return { teamDomain, auds, certsUrl: teamDomain + '/cdn-cgi/access/certs', allowedEmails }
 }
 
 // ---- JWKS cache ----
@@ -165,6 +197,12 @@ async function fetchJwks(certsUrl: string): Promise<Map<string, CryptoKey> | nul
     const res = await fetch(certsUrl, {
       signal: ctl.signal,
       headers: { accept: 'application/json' },
+      // A redirect is an error, not something to follow. The certs URL is built
+      // from a hostname this module has already constrained to
+      // `*.cloudflareaccess.com`; following a redirect would hand that constraint
+      // back to whatever answered, and signing keys taken from a redirect target
+      // are keys chosen by someone other than the team.
+      redirect: 'error',
       // Cloudflare's own cache; harmless where `cf` is not understood.
       cf: { cacheTtl: 3600, cacheEverything: true },
     } as RequestInit)
@@ -365,6 +403,13 @@ export async function verifyAccessJwt(
   const email = payload.email
   if (typeof email !== 'string' || email.length === 0 || email.length > 320) {
     return fail(403, 'no-identity')
+  }
+
+  // The optional second gate. Unset means "the Access policy decides", which is
+  // what ADR-0033 §5 specifies; set, it means a policy that grew by accident does
+  // not on its own become permission to publish.
+  if (config.allowedEmails.length > 0 && !config.allowedEmails.includes(email.toLowerCase())) {
+    return fail(403, 'not-on-allow-list')
   }
 
   const sub = typeof payload.sub === 'string' ? payload.sub : ''

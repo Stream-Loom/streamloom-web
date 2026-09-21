@@ -16,8 +16,20 @@
 const CHANNELS_URL = 'https://iptv-org.github.io/api/channels.json'
 const BLOCKLIST_URL = 'https://iptv-org.github.io/api/blocklist.json'
 
-/** How long an index is reused. Upstream changes at most daily. */
+/** How long an index is reused without trying to refresh it. Upstream changes at most daily. */
 const TTL_MS = 6 * 60 * 60 * 1000
+
+/**
+ * How stale a copy may get before it stops being usable at all.
+ *
+ * Past the TTL a stale copy is still preferred to refusing every save during an
+ * upstream outage — but only for a bounded time. The blocklist is a takedown
+ * list: an id added to it yesterday must not stay pinnable for a week because
+ * this isolate happens to hold an old copy. After 24 hours the save fails closed
+ * with 503 instead, which is loud, recoverable and never publishes something
+ * upstream has since forbidden.
+ */
+const MAX_STALE_MS = 24 * 60 * 60 * 1000
 /** Floor between fetch attempts after a failure, so an outage is not hammered. */
 const MIN_RETRY_MS = 60 * 1000
 
@@ -60,6 +72,15 @@ export function resetIptvCache(): void {
   cached = null
   lastAttempt = 0
   inFlight = null
+}
+
+/**
+ * Test seam: backdates the held copy (and the retry floor) by `byMs`, so the
+ * staleness rules can be exercised without waiting hours.
+ */
+export function ageIptvCacheForTest(byMs: number): void {
+  if (cached) cached.fetchedAt -= byMs
+  lastAttempt -= byMs
 }
 
 async function getJson(url: string, maxBytes: number): Promise<unknown | null> {
@@ -144,31 +165,49 @@ async function build(): Promise<IptvIndex | null> {
   return { byId, all, fetchedAt: Date.now() }
 }
 
+/** A copy older than this is treated as if it were not held at all. */
+const usable = (index: IptvIndex | null, now: number): IptvIndex | null =>
+  index && now - index.fetchedAt < MAX_STALE_MS ? index : null
+
 /**
  * The index, from cache when it is fresh. Null when it could not be built and no
- * usable copy is held — the caller must then refuse the request.
+ * copy inside `MAX_STALE_MS` is held — the caller must then refuse the request.
  *
- * A stale copy is preferred to nothing: the blocklist changes rarely and serving
- * yesterday's is far better than refusing every save during an upstream outage.
+ * Within that window a stale copy is preferred to nothing: the blocklist changes
+ * rarely and serving yesterday's is far better than refusing every save during an
+ * upstream outage. Past it, refusing is the safer answer (see `MAX_STALE_MS`).
  */
 export async function loadIptvIndex(): Promise<IptvIndex | null> {
   const now = Date.now()
   if (cached && now - cached.fetchedAt < TTL_MS) return cached
   if (inFlight) return inFlight
-  if (now - lastAttempt < MIN_RETRY_MS) return cached
+  if (now - lastAttempt < MIN_RETRY_MS) return usable(cached, now)
 
   lastAttempt = now
   inFlight = build()
     .then((built) => {
       if (built) cached = built
-      return cached
+      return usable(cached, Date.now())
     })
-    .catch(() => cached)
+    .catch(() => usable(cached, Date.now()))
     .finally(() => {
       inFlight = null
     })
   return inFlight
 }
+
+/**
+ * How old the copy `index` was built from is, in whole minutes.
+ *
+ * Reported to the author when a save was checked against a stale list, so a
+ * warning that "this was checked against a list from 9 hours ago" is visible
+ * rather than implied.
+ */
+export const indexAgeMinutes = (index: IptvIndex): number =>
+  Math.max(0, Math.floor((Date.now() - index.fetchedAt) / 60_000))
+
+/** True when `index` is past its refresh window and a save should say so. */
+export const isIndexStale = (index: IptvIndex): boolean => Date.now() - index.fetchedAt >= TTL_MS
 
 export type PickVerdict =
   | { verdict: 'ok'; channel: IptvChannel }

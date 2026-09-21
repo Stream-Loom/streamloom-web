@@ -43,16 +43,35 @@ export const LIMITS = {
 const CHANNEL_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._@-]*$/
 
 /**
- * True when a string carries a C0/C1 control character or a Unicode line
- * separator. Written as a scan rather than a regular expression so the file
- * contains no literal control bytes of its own.
+ * True when a string carries a character that must not appear in a title or a
+ * note. Written as a scan rather than a regular expression so the file contains
+ * no literal control bytes of its own.
+ *
+ * Three families, all refused:
+ *
+ *  - **C0/C1 controls and the line separators** (U+0000–U+001F, U+007F–U+009F,
+ *    U+2028, U+2029): they break a log line, a JSON pretty-print and a terminal.
+ *  - **Bidirectional overrides** (U+202A–U+202E, U+2066–U+2069): "Trojan Source".
+ *    They let the rendered order of a string differ from its stored order, so a
+ *    group could read one way in the portal and another on the site, or a note
+ *    could be made to display text it does not contain.
+ *  - **Zero-width and invisible characters** (U+200B–U+200D, U+2060, U+FEFF):
+ *    two groups could look identical while comparing unequal, which would defeat
+ *    the duplicate-title check and leave an invisible difference the author
+ *    cannot see or correct.
+ *
+ * Every one of these is BMP, so a UTF-16 unit scan sees them whole.
  */
-function hasControlChar(value: string): boolean {
+function hasForbiddenChar(value: string): boolean {
   for (let i = 0; i < value.length; i += 1) {
     const code = value.charCodeAt(i)
     if (code < 0x20) return true
     if (code >= 0x7f && code <= 0x9f) return true
     if (code === 0x2028 || code === 0x2029) return true
+    if (code >= 0x202a && code <= 0x202e) return true
+    if (code >= 0x2066 && code <= 0x2069) return true
+    if (code >= 0x200b && code <= 0x200d) return true
+    if (code === 0x2060 || code === 0xfeff) return true
   }
   return false
 }
@@ -102,7 +121,7 @@ function cleanString(value: unknown, max: number): string | null {
   if (typeof value !== 'string') return null
   const trimmed = value.trim()
   if (trimmed.length === 0) return null
-  if (hasControlChar(trimmed)) return null
+  if (hasForbiddenChar(trimmed)) return null
   if ([...trimmed].length > max) return null
   return trimmed
 }

@@ -168,9 +168,16 @@ effect on production until it is added in the dashboard as well, and adding
   signature against the team's JWKS, `kid`, RS256 only, `aud`, `iss`, `exp`/`nbf` — so a
   misconfigured or deleted Access application cannot expose the write. The URL path, the `Origin`
   header and every other client-settable value take no part in the decision.
-- **Rule**: **fail closed.** Missing `CF_ACCESS_TEAM_DOMAIN`/`CF_ACCESS_AUD`, an unreadable JWKS,
-  a missing `CATALOGUE_BUCKET` binding, or an unreachable iptv-org list each end the request with
-  503 and **write nothing**. Never add a route that is unauthenticated "for now".
+- **Rule**: **fail closed.** Missing `CF_ACCESS_TEAM_DOMAIN`/`CF_ACCESS_AUD`, a malformed
+  `CF_ACCESS_ALLOWED_EMAILS`, an unreadable JWKS, a `CATALOGUE_BUCKET` that is not an R2 binding,
+  a bound bucket that does not contain `catalogue/meta.json`, or an iptv-org list that could not
+  be read or is over 24 hours old each end the request with 503 and **write nothing**. Never add
+  a route that is unauthenticated "for now".
+- **Rule**: an unauthenticated caller gets a generic refusal (`{"error":"unauthorised"}`), never
+  the reason, a variable name or anything about the hosting. The reason goes to `console.warn`,
+  which Pages observability captures; the setup guidance lives in README.md.
+- The binding is wrapped in a three-method facade (`get`/`head`/`put`) before use, so the R2
+  binding's `delete` is unreachable from this route at runtime, not only in the types.
 - Every `channelId` is checked against the public iptv-org list at save time; `blocklist.json`
   entries and `is_nsfw` channels are refused, `closed`/`replaced_by` accepted with a warning.
   `picks.json` is written with an `If-Match` ETag (a stale write is a 412 carrying the newer copy)

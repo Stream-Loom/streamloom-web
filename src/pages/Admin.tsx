@@ -132,8 +132,14 @@ export function Admin() {
         return
       }
       if (res.status === 503) {
+        // An unauthenticated 503 carries no detail on purpose (it must not tell a
+        // stranger which variable is missing), so the page falls back to pointing
+        // at the setup steps rather than inventing a cause.
         const body = (await res.json().catch(() => null)) as { detail?: string } | null
-        setProblem(body?.detail ?? 'The portal is not configured yet.')
+        setProblem(
+          body?.detail ??
+            'The portal is not configured yet, or this browser is not signed in through Cloudflare Access. See "The author\'s-picks portal" in README.md for the four setup steps.',
+        )
         setPhase('unconfigured')
         return
       }

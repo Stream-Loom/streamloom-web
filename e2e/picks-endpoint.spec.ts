@@ -1,8 +1,16 @@
 import { test, expect } from '@playwright/test'
-import { onRequest as picksHandler } from '../functions/api/picks/index'
+import {
+  bindBucket,
+  onRequest as picksHandler,
+  writeHistory,
+} from '../functions/api/picks/index'
 import { onRequest as channelsHandler } from '../functions/api/picks/channels'
-import { resetAccessJwksCache } from '../functions/api/_lib/accessJwt'
-import { resetIptvCache } from '../functions/api/_lib/iptvOrg'
+import {
+  readAccessConfig,
+  resetAccessJwksCache,
+  verifyAccessJwt,
+} from '../functions/api/_lib/accessJwt'
+import { ageIptvCacheForTest, resetIptvCache } from '../functions/api/_lib/iptvOrg'
 import { jwks, makeTestKey, mintToken, validPayload, type TestKey } from './support/accessTokens'
 
 /**
@@ -48,13 +56,23 @@ interface StoredObject {
 }
 
 /**
+ * The object the route requires before it will write: proof that the binding
+ * really is the catalogue bucket and not `channel-icons` or an empty one.
+ */
+const PROOF = { 'catalogue/meta.json': JSON.stringify({ generation: 1, version: 2, layout: 1 }) }
+
+/**
  * Minimal R2 double.
  *
  * Every mutation is recorded, and `delete` is deliberately present so a test can
- * prove the route never calls it — the real binding interface in the Function
- * does not declare one.
+ * prove the route never calls it — and can no longer reach it, since the Function
+ * now wraps the binding in a three-method facade.
+ *
+ * `onlyIf` is honoured for both conditions the route uses: `etagMatches` (the
+ * picks.json compare-and-set) and `etagDoesNotMatch: '*'` (the append-only
+ * history write).
  */
-function makeBucket(initial: Record<string, string> = {}) {
+function makeBucket(initial: Record<string, string> = PROOF) {
   const objects = new Map<string, StoredObject>()
   const mutations: string[] = []
   let etagSeq = 0
@@ -79,10 +97,19 @@ function makeBucket(initial: Record<string, string> = {}) {
     async head(key: string) {
       return objects.has(key) ? { key } : null
     },
-    async put(key: string, value: string, options?: { onlyIf?: { etagMatches?: string } }) {
+    async put(
+      key: string,
+      value: string,
+      options?: { onlyIf?: { etagMatches?: string; etagDoesNotMatch?: string } },
+    ) {
       const existing = objects.get(key)
-      const required = options?.onlyIf?.etagMatches
-      if (required !== undefined && existing?.etag.replace(/^W\//, '') !== required) {
+      const mustMatch = options?.onlyIf?.etagMatches
+      if (mustMatch !== undefined && existing?.etag.replace(/^W\//, '') !== mustMatch) {
+        mutations.push(`put-refused ${key}`)
+        return null
+      }
+      const mustNotMatch = options?.onlyIf?.etagDoesNotMatch
+      if (mustNotMatch === '*' && existing) {
         mutations.push(`put-refused ${key}`)
         return null
       }
@@ -96,7 +123,10 @@ function makeBucket(initial: Record<string, string> = {}) {
     },
   }
 
-  return { bucket, objects, mutations }
+  /** Mutations that actually changed the bucket (a refused conditional put did not). */
+  const writes = () => mutations.filter((m) => m.startsWith('put ') || m.startsWith('delete '))
+
+  return { bucket, objects, mutations, writes }
 }
 
 /** Runs a handler the way Pages does, draining anything it defers. */
@@ -254,7 +284,6 @@ test.describe('the Access gate', () => {
     const { bucket, mutations } = makeBucket()
     const res = await call(picksHandler, writeRequest(token), { ...ENV_VARS, CATALOGUE_BUCKET: bucket })
     expect(res.status).toBe(401)
-    expect((await res.json()).reason).toBe('expired')
     expect(mutations).toEqual([])
   })
 
@@ -282,7 +311,6 @@ test.describe('the Access gate', () => {
     const { bucket, mutations } = makeBucket()
     const res = await call(picksHandler, writeRequest(token), { ...ENV_VARS, CATALOGUE_BUCKET: bucket })
     expect(res.status).toBe(403)
-    expect((await res.json()).reason).toBe('wrong-audience')
     expect(mutations).toEqual([])
   })
 
@@ -294,7 +322,6 @@ test.describe('the Access gate', () => {
     const { bucket, mutations } = makeBucket()
     const res = await call(picksHandler, writeRequest(token), { ...ENV_VARS, CATALOGUE_BUCKET: bucket })
     expect(res.status).toBe(403)
-    expect((await res.json()).reason).toBe('wrong-issuer')
     expect(mutations).toEqual([])
   })
 
@@ -311,7 +338,6 @@ test.describe('the Access gate', () => {
       CATALOGUE_BUCKET: bucket,
     })
     expect(res.status).toBe(401)
-    expect((await res.json()).reason).toBe('bad-signature')
     expect(mutations).toEqual([])
   })
 
@@ -325,7 +351,6 @@ test.describe('the Access gate', () => {
     const { bucket, mutations } = makeBucket()
     const res = await call(picksHandler, writeRequest(token), { ...ENV_VARS, CATALOGUE_BUCKET: bucket })
     expect(res.status).toBe(401)
-    expect((await res.json()).reason).toBe('unsupported-alg')
     expect(stub.outbound).not.toContain(CERTS)
     expect(mutations).toEqual([])
   })
@@ -340,7 +365,6 @@ test.describe('the Access gate', () => {
     const { bucket, mutations } = makeBucket()
     const res = await call(picksHandler, writeRequest(token), { ...ENV_VARS, CATALOGUE_BUCKET: bucket })
     expect(res.status).toBe(401)
-    expect((await res.json()).reason).toBe('unsupported-alg')
     expect(mutations).toEqual([])
   })
 
@@ -349,7 +373,6 @@ test.describe('the Access gate', () => {
     const { bucket, mutations } = makeBucket()
     const res = await call(picksHandler, writeRequest(token), { ...ENV_VARS, CATALOGUE_BUCKET: bucket })
     expect(res.status).toBe(401)
-    expect((await res.json()).reason).toBe('unknown-kid')
     expect(mutations).toEqual([])
   })
 
@@ -360,7 +383,6 @@ test.describe('the Access gate', () => {
     const { bucket, mutations } = makeBucket()
     const res = await call(picksHandler, writeRequest(token), { ...ENV_VARS, CATALOGUE_BUCKET: bucket })
     expect(res.status).toBe(401)
-    expect((await res.json()).reason).toBe('bad-signature')
     expect(mutations).toEqual([])
   })
 
@@ -369,7 +391,6 @@ test.describe('the Access gate', () => {
     const { bucket, mutations } = makeBucket()
     const res = await call(picksHandler, writeRequest(await goodToken()), { ...ENV_VARS, CATALOGUE_BUCKET: bucket })
     expect(res.status).toBe(503)
-    expect((await res.json()).reason).toBe('jwks-unavailable')
     expect(mutations).toEqual([])
   })
 
@@ -380,7 +401,6 @@ test.describe('the Access gate', () => {
     const { bucket, mutations } = makeBucket()
     const res = await call(picksHandler, writeRequest(token), { ...ENV_VARS, CATALOGUE_BUCKET: bucket })
     expect(res.status).toBe(403)
-    expect((await res.json()).reason).toBe('no-identity')
     expect(mutations).toEqual([])
   })
 
@@ -421,7 +441,6 @@ test.describe('configuration fails closed', () => {
       const { bucket, mutations } = makeBucket()
       const res = await call(picksHandler, writeRequest(await goodToken()), { ...env, CATALOGUE_BUCKET: bucket })
       expect(res.status).toBe(503)
-      expect((await res.json()).reason).toBe('access-not-configured')
       expect(mutations).toEqual([])
       // Nothing was fetched either: the request ends before the JWKS is wanted.
       expect(stub.outbound).not.toContain(CERTS)
@@ -450,7 +469,7 @@ test.describe('the route surface', () => {
   })
 
   test('DELETE is not a method this route has', async () => {
-    const { bucket, mutations } = makeBucket({ 'catalogue/picks.json': JSON.stringify(GOOD_BODY) })
+    const { bucket, mutations } = makeBucket({ ...PROOF, 'catalogue/picks.json': JSON.stringify(GOOD_BODY) })
     const res = await call(
       picksHandler,
       new Request(`${ORIGIN}/api/picks`, {
@@ -602,7 +621,7 @@ test.describe('validation on save', () => {
 test.describe('concurrent edits', () => {
   test('a save without If-Match over an existing document returns 412 with the newer copy', async () => {
     const existing = JSON.stringify({ schema: 1, updatedAt: '2026-01-01T00:00:00.000Z', groups: [] })
-    const { bucket, mutations } = makeBucket({ 'catalogue/picks.json': existing })
+    const { bucket, mutations } = makeBucket({ ...PROOF, 'catalogue/picks.json': existing })
     const res = await call(picksHandler, writeRequest(await goodToken()), {
       ...ENV_VARS,
       CATALOGUE_BUCKET: bucket,
@@ -616,7 +635,7 @@ test.describe('concurrent edits', () => {
 
   test('a stale If-Match returns 412 with the newer copy and writes nothing', async () => {
     const existing = JSON.stringify({ schema: 1, updatedAt: '2026-01-01T00:00:00.000Z', groups: [] })
-    const { bucket, mutations } = makeBucket({ 'catalogue/picks.json': existing })
+    const { bucket, mutations } = makeBucket({ ...PROOF, 'catalogue/picks.json': existing })
     const res = await call(
       picksHandler,
       writeRequest(await goodToken(), GOOD_BODY, { 'if-match': '"an-older-etag"' }),
@@ -680,7 +699,7 @@ test.describe('concurrent edits', () => {
 test.describe('reading', () => {
   test('GET returns the stored document and its ETag', async () => {
     const existing = JSON.stringify({ schema: 1, updatedAt: '2026-02-02T00:00:00.000Z', groups: [] })
-    const { bucket } = makeBucket({ 'catalogue/picks.json': existing })
+    const { bucket } = makeBucket({ ...PROOF, 'catalogue/picks.json': existing })
     const res = await call(
       picksHandler,
       new Request(`${ORIGIN}/api/picks`, { headers: { 'Cf-Access-Jwt-Assertion': await goodToken() } }),
@@ -735,5 +754,378 @@ test.describe('the picker search', () => {
     )
     const body = await res.json()
     expect(body.results.map((c: { id: string }) => c.id)).toEqual(['BBCNews.uk'])
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Findings from the adversarial review of f96e3e7.
+// ---------------------------------------------------------------------------
+
+test.describe('the verifier reports why, where only the log can see it', () => {
+  /**
+   * The handler's refusal body is generic on purpose: an unauthenticated caller
+   * is told nothing but "refused". The precise reason still has to be right, so
+   * it is asserted here, one layer down, against `verifyAccessJwt` itself.
+   */
+  const config = () => readAccessConfig(ENV_VARS)!
+
+  test('every failure mode names itself to the caller inside the Function', async () => {
+    const nowS = Math.floor(Date.now() / 1000)
+    const cases: [string, string][] = [
+      ['missing-token', ''],
+      ['malformed-token', 'a.b'],
+      [
+        'unsupported-alg',
+        await mintToken({ key, payload: validPayload(TEAM, AUD), header: { alg: 'none', kid: key.kid }, rawSignature: '' }),
+      ],
+      ['unknown-kid', await mintToken({ key: otherKey, payload: validPayload(TEAM, AUD) })],
+      [
+        'expired',
+        await mintToken({ key, payload: validPayload(TEAM, AUD, { exp: nowS - 3600, iat: nowS - 7200, nbf: nowS - 7200 }) }),
+      ],
+      ['wrong-audience', await mintToken({ key, payload: validPayload(TEAM, 'z'.repeat(64)) })],
+      ['wrong-issuer', await mintToken({ key, payload: validPayload('https://other.cloudflareaccess.com', AUD) })],
+      ['not-yet-valid', await mintToken({ key, payload: validPayload(TEAM, AUD, { nbf: nowS + 3600, iat: nowS }) })],
+    ]
+    for (const [expected, token] of cases) {
+      const result = await verifyAccessJwt(token, config())
+      expect(result.ok).toBe(false)
+      expect((result as { reason: string }).reason).toBe(expected)
+    }
+  })
+
+  test('the handler answers generically: no reason, no variable names, no platform', async () => {
+    const { bucket } = makeBucket()
+    const res = await call(picksHandler, writeRequest('a.b'), { ...ENV_VARS, CATALOGUE_BUCKET: bucket })
+    expect(res.status).toBe(401)
+    expect(await res.json()).toEqual({ error: 'unauthorised' })
+  })
+
+  test('an unconfigured project tells a stranger nothing about how to configure it', async () => {
+    const { bucket } = makeBucket()
+    const res = await call(picksHandler, writeRequest(await goodToken()), { CATALOGUE_BUCKET: bucket })
+    expect(res.status).toBe(503)
+    const text = JSON.stringify(await res.json())
+    expect(text).toBe('{"error":"unavailable"}')
+    expect(text).not.toContain('CF_ACCESS')
+    expect(text).not.toContain('Pages')
+  })
+})
+
+test.describe('the JWKS is fetched from the team and nowhere else', () => {
+  test('the certs request refuses to follow a redirect', async () => {
+    let init: RequestInit | undefined
+    const original = globalThis.fetch
+    globalThis.fetch = (async (input: RequestInfo | URL, options?: RequestInit) => {
+      const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url
+      if (url === CERTS) init = options
+      return original(input as RequestInfo, options)
+    }) as typeof fetch
+    try {
+      const { bucket } = makeBucket()
+      await call(picksHandler, writeRequest(await goodToken()), { ...ENV_VARS, CATALOGUE_BUCKET: bucket })
+    } finally {
+      globalThis.fetch = original
+    }
+    // A redirect would hand the `*.cloudflareaccess.com` constraint back to
+    // whatever answered; signing keys from a redirect target are not the team's.
+    expect(init?.redirect).toBe('error')
+  })
+
+  test('a redirected certs endpoint fails closed with 503, never open', async () => {
+    stub.restore()
+    const original = globalThis.fetch
+    globalThis.fetch = (async (input: RequestInfo | URL, options?: RequestInit) => {
+      const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url
+      if (url === CERTS) {
+        // What `redirect: 'error'` does to a 302: the fetch rejects.
+        if (options?.redirect === 'error') throw new TypeError('unexpected redirect')
+        return new Response(jwks(otherKey), { status: 200 })
+      }
+      return new Response('[]', { status: 200, headers: { 'content-type': 'application/json' } })
+    }) as typeof fetch
+    try {
+      const { bucket, writes } = makeBucket()
+      const res = await call(picksHandler, writeRequest(await goodToken()), {
+        ...ENV_VARS,
+        CATALOGUE_BUCKET: bucket,
+      })
+      expect(res.status).toBe(503)
+      expect(writes()).toEqual([])
+    } finally {
+      globalThis.fetch = original
+    }
+  })
+})
+
+test.describe('the optional email allow-list', () => {
+  const withList = (list: string) => ({ ...ENV_VARS, CF_ACCESS_ALLOWED_EMAILS: list })
+
+  test('unset leaves behaviour exactly as it was', async () => {
+    const { bucket, objects } = makeBucket()
+    const res = await call(picksHandler, writeRequest(await goodToken()), { ...ENV_VARS, CATALOGUE_BUCKET: bucket })
+    expect(res.status).toBe(200)
+    expect(objects.has('catalogue/picks.json')).toBe(true)
+  })
+
+  test('a listed identity saves; a verified but unlisted one is refused with 403', async () => {
+    const env = withList('Owner@Example.com, second@example.com')
+
+    for (const email of ['owner@example.com', 'SECOND@EXAMPLE.COM']) {
+      const { bucket, objects } = makeBucket()
+      const token = await mintToken({ key, payload: validPayload(TEAM, AUD, { email }) })
+      const res = await call(picksHandler, writeRequest(token), { ...env, CATALOGUE_BUCKET: bucket })
+      expect(res.status).toBe(200)
+      expect(objects.has('catalogue/picks.json')).toBe(true)
+    }
+
+    // A token Access itself would accept — correct signature, audience, issuer —
+    // but for an identity the owner did not list.
+    const { bucket, writes } = makeBucket()
+    const stranger = await mintToken({
+      key,
+      payload: validPayload(TEAM, AUD, { email: 'someone-else@example.com' }),
+    })
+    const res = await call(picksHandler, writeRequest(stranger), { ...env, CATALOGUE_BUCKET: bucket })
+    expect(res.status).toBe(403)
+    expect(writes()).toEqual([])
+
+    const result = await verifyAccessJwt(stranger, readAccessConfig(env)!)
+    expect((result as { reason: string }).reason).toBe('not-on-allow-list')
+  })
+
+  test('a malformed or oversized list fails the whole configuration closed', async () => {
+    for (const list of ['not-an-email', 'a@b.com, no-at-sign', 'a b@c.com', Array.from({ length: 11 }, (_, i) => `a${i}@b.com`).join(',')]) {
+      expect(readAccessConfig({ ...ENV_VARS, CF_ACCESS_ALLOWED_EMAILS: list })).toBeNull()
+
+      const { bucket, writes } = makeBucket()
+      const res = await call(picksHandler, writeRequest(await goodToken()), {
+        ...ENV_VARS,
+        CF_ACCESS_ALLOWED_EMAILS: list,
+        CATALOGUE_BUCKET: bucket,
+      })
+      expect(res.status).toBe(503)
+      expect(writes()).toEqual([])
+    }
+  })
+
+  test('a blank list is the same as unset, not an empty allow-list', async () => {
+    const config = readAccessConfig({ ...ENV_VARS, CF_ACCESS_ALLOWED_EMAILS: '   ' })
+    expect(config?.allowedEmails).toEqual([])
+  })
+})
+
+test.describe('the binding must really be the catalogue bucket', () => {
+  test('a plain variable named CATALOGUE_BUCKET is 503, not a 500', async () => {
+    for (const notABinding of ['streamloom-catalogue', 42, true, [], null]) {
+      expect(bindBucket({ CATALOGUE_BUCKET: notABinding })).toBeNull()
+      const res = await call(picksHandler, writeRequest(await goodToken()), {
+        ...ENV_VARS,
+        CATALOGUE_BUCKET: notABinding,
+      })
+      expect(res.status).toBe(503)
+      expect((await res.json()).error).toBe('storage-not-configured')
+    }
+  })
+
+  test('an object missing one of the three methods is not accepted as a binding', async () => {
+    const partial = { get: () => null, head: () => null }
+    expect(bindBucket({ CATALOGUE_BUCKET: partial })).toBeNull()
+  })
+
+  test('the facade exposes only get/head/put, so delete is unreachable', async () => {
+    const { bucket, mutations } = makeBucket()
+    const facade = bindBucket({ CATALOGUE_BUCKET: bucket })!
+    expect(Object.keys(facade).sort()).toEqual(['get', 'head', 'put'])
+    expect('delete' in facade).toBe(false)
+    expect((facade as unknown as Record<string, unknown>).delete).toBeUndefined()
+    // The underlying double still has one, so this is the facade's doing, not the double's.
+    expect(typeof bucket.delete).toBe('function')
+    expect(mutations).toEqual([])
+  })
+
+  test('a bucket without catalogue/meta.json is refused: nothing is seeded into the wrong bucket', async () => {
+    // What a binding aimed at `channel-icons` looks like from here.
+    const { bucket, writes } = makeBucket({ 'icons/BBCNews.uk.webp': 'not-json' })
+    const res = await call(picksHandler, writeRequest(await goodToken()), {
+      ...ENV_VARS,
+      CATALOGUE_BUCKET: bucket,
+    })
+    expect(res.status).toBe(503)
+    expect((await res.json()).error).toBe('wrong-bucket')
+    expect(writes()).toEqual([])
+  })
+
+  test('an empty bucket, before the first catalogue publish, is refused the same way', async () => {
+    const { bucket, writes } = makeBucket({})
+    const res = await call(picksHandler, writeRequest(await goodToken()), {
+      ...ENV_VARS,
+      CATALOGUE_BUCKET: bucket,
+    })
+    expect(res.status).toBe(503)
+    expect(writes()).toEqual([])
+  })
+
+  test('a GET still works before the first publish, so the portal can open and explain itself', async () => {
+    const { bucket } = makeBucket({})
+    const res = await call(
+      picksHandler,
+      new Request(`${ORIGIN}/api/picks`, { headers: { 'Cf-Access-Jwt-Assertion': await goodToken() } }),
+      { ...ENV_VARS, CATALOGUE_BUCKET: bucket },
+    )
+    expect(res.status).toBe(200)
+    expect((await res.json()).picks).toBeNull()
+  })
+})
+
+test.describe('invisible and reordering characters', () => {
+  const BIDI = ['‪', '‫', '‬', '‭', '‮', '⁦', '⁧', '⁨', '⁩']
+  const INVISIBLE = ['​', '‌', '‍', '⁠', '﻿']
+
+  for (const [label, chars] of [['bidi overrides', BIDI], ['zero-width characters', INVISIBLE]] as const) {
+    test(`${label} are refused in a group title`, async () => {
+      for (const ch of chars) {
+        const { bucket, writes } = makeBucket()
+        const body = { schema: 1, groups: [{ title: `News${ch}Sport`, items: [] }] }
+        const res = await call(picksHandler, writeRequest(await goodToken(), body), {
+          ...ENV_VARS,
+          CATALOGUE_BUCKET: bucket,
+        })
+        expect(res.status).toBe(400)
+        expect(writes()).toEqual([])
+      }
+    })
+
+    test(`${label} are refused in a note`, async () => {
+      for (const ch of chars) {
+        const { bucket, writes } = makeBucket()
+        const body = {
+          schema: 1,
+          groups: [{ title: 'News', items: [{ channelId: 'BBCNews.uk', note: `safe${ch}text` }] }],
+        }
+        const res = await call(picksHandler, writeRequest(await goodToken(), body), {
+          ...ENV_VARS,
+          CATALOGUE_BUCKET: bucket,
+        })
+        expect(res.status).toBe(400)
+        expect(writes()).toEqual([])
+      }
+    })
+  }
+
+  test('two titles that look identical cannot both be saved by hiding a zero-width character', async () => {
+    const { bucket, writes } = makeBucket()
+    const body = { schema: 1, groups: [{ title: 'News', items: [] }, { title: 'New​s', items: [] }] }
+    const res = await call(picksHandler, writeRequest(await goodToken(), body), {
+      ...ENV_VARS,
+      CATALOGUE_BUCKET: bucket,
+    })
+    expect(res.status).toBe(400)
+    expect(writes()).toEqual([])
+  })
+
+  test('ordinary non-ASCII text is still accepted', async () => {
+    const { bucket, objects } = makeBucket()
+    const body = {
+      schema: 1,
+      groups: [{ title: 'Actualités 📺', items: [{ channelId: 'Arte.fr', note: 'Câble — très bien' }] }],
+    }
+    const res = await call(picksHandler, writeRequest(await goodToken(), body), {
+      ...ENV_VARS,
+      CATALOGUE_BUCKET: bucket,
+    })
+    expect(res.status).toBe(200)
+    expect(JSON.parse(objects.get('catalogue/picks.json')!.body).groups[0].title).toBe('Actualités 📺')
+  })
+})
+
+test.describe('how stale the iptv-org list may get', () => {
+  /** Warms the cache, then breaks upstream and backdates the copy by `hours`. */
+  async function warmThenAge(hours: number) {
+    const { bucket } = makeBucket()
+    await call(picksHandler, writeRequest(await goodToken()), { ...ENV_VARS, CATALOGUE_BUCKET: bucket })
+    stub.iptvStatus = 500
+    ageIptvCacheForTest(hours * 60 * 60 * 1000)
+  }
+
+  test('a copy inside 24 hours still saves, and the response says how old it was', async () => {
+    await warmThenAge(9)
+    const { bucket, objects } = makeBucket()
+    const res = await call(picksHandler, writeRequest(await goodToken()), {
+      ...ENV_VARS,
+      CATALOGUE_BUCKET: bucket,
+    })
+    expect(res.status).toBe(200)
+    expect(((await res.json()).warnings as string[]).join(' ')).toContain('9h')
+    expect(objects.has('catalogue/picks.json')).toBe(true)
+  })
+
+  test('a copy past 24 hours fails the save closed: a takedown must not stay pinnable', async () => {
+    await warmThenAge(25)
+    const { bucket, writes } = makeBucket()
+    const res = await call(picksHandler, writeRequest(await goodToken()), {
+      ...ENV_VARS,
+      CATALOGUE_BUCKET: bucket,
+    })
+    expect(res.status).toBe(503)
+    expect((await res.json()).error).toBe('validation-unavailable')
+    expect(writes()).toEqual([])
+  })
+
+  test('a fresh copy carries no staleness warning', async () => {
+    const { bucket } = makeBucket()
+    const res = await call(picksHandler, writeRequest(await goodToken()), {
+      ...ENV_VARS,
+      CATALOGUE_BUCKET: bucket,
+    })
+    expect((await res.json()).warnings).toEqual([])
+  })
+})
+
+test.describe('history is append-only under concurrency', () => {
+  const AT = '2026-09-22T01:02:03.456Z'
+
+  test('two saves in the same millisecond both survive, under different keys', async () => {
+    const { bucket, objects } = makeBucket()
+    const facade = bindBucket({ CATALOGUE_BUCKET: bucket })!
+
+    // Not sequential: both conditional puts are in flight before either resolves,
+    // which is the case a head-then-put loses.
+    const [first, second] = await Promise.all([
+      writeHistory(facade, AT, '{"n":1}'),
+      writeHistory(facade, AT, '{"n":2}'),
+    ])
+
+    expect(first).not.toBeNull()
+    expect(second).not.toBeNull()
+    expect(first).not.toBe(second)
+
+    const bodies = [objects.get(first!)!.body, objects.get(second!)!.body].sort()
+    expect(bodies).toEqual(['{"n":1}', '{"n":2}'])
+  })
+
+  test('a third and fourth save at the same instant keep going, never replacing', async () => {
+    const { bucket, objects } = makeBucket()
+    const facade = bindBucket({ CATALOGUE_BUCKET: bucket })!
+    const keys = await Promise.all(
+      [1, 2, 3, 4].map((n) => writeHistory(facade, AT, JSON.stringify({ n }))),
+    )
+    expect(new Set(keys).size).toBe(4)
+    expect([...objects.keys()].filter((k) => k.startsWith('picks-history/'))).toHaveLength(4)
+  })
+
+  test('the write is conditional, so the store refuses a key rather than this code checking first', async () => {
+    const seen: unknown[] = []
+    const { bucket } = makeBucket()
+    const spy = {
+      get: bucket.get,
+      head: bucket.head,
+      put: async (key: string, value: string, options?: unknown) => {
+        seen.push(options)
+        return bucket.put(key, value, options as never)
+      },
+    }
+    await writeHistory(bindBucket({ CATALOGUE_BUCKET: spy })!, AT, '{}')
+    expect(seen[0]).toMatchObject({ onlyIf: { etagDoesNotMatch: '*' } })
   })
 })

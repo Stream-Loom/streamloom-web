@@ -217,20 +217,51 @@ it reaches the browser bundle.
    MFA required. Copy the **Application Audience (AUD) tag**.
 2. **Workers & Pages -> `streamloomweb` -> Settings -> Variables and Secrets**,
    under **both Production and Preview**:
-   | Variable | Value |
-   |---|---|
-   | `CF_ACCESS_TEAM_DOMAIN` | `https://<team>.cloudflareaccess.com` |
-   | `CF_ACCESS_AUD` | the AUD tag copied above |
+   | Variable | Value | |
+   |---|---|---|
+   | `CF_ACCESS_TEAM_DOMAIN` | `https://<team>.cloudflareaccess.com` | required |
+   | `CF_ACCESS_AUD` | the AUD tag copied above | required |
+   | `CF_ACCESS_ALLOWED_EMAILS` | your email address | **recommended** |
+
    If you created two applications instead of one, set `CF_ACCESS_AUD` to both
    tags **comma-separated** (`tag1,tag2`); the endpoint accepts a token carrying
-   either and nothing else. Until both variables are set, `/api/picks` answers
-   **503 and writes nothing**.
+   either and nothing else. Until the two required variables are set,
+   `/api/picks` answers **503 and writes nothing**.
+
+   `CF_ACCESS_ALLOWED_EMAILS` (comma-separated, case-insensitive, exact match) is
+   optional defence in depth: with it set, a verified token whose `email` is not
+   on the list is refused with 403 even though Access let it through. An Access
+   policy widened by accident — an extra rule, a group that grew, a second
+   identity provider attached to the application — then does not by itself become
+   permission to publish. Leaving it unset keeps the Access policy as the only
+   allow-list. A value that is *present but malformed* fails the whole
+   configuration closed, so a typo here cannot widen access.
 3. **Settings -> Bindings -> Add -> R2 bucket**: variable name
    `CATALOGUE_BUCKET`, bucket `streamloom-catalogue`. **Not** `channel-icons` —
    that bucket sits behind a public read route. Redeploy for it to take effect.
+
+   Add this binding in **Production only, not Preview.** Preview deployments are
+   built from every branch and pull request, so a branch is the least trustworthy
+   place to hold the one write capability this project has. Without the binding a
+   preview's `/api/picks` answers 503 and writes nothing, which is the right
+   answer for a branch. (The two `CF_ACCESS_*` variables *do* belong in both
+   scopes: a preview with no Access configuration is safe, but impossible to sign
+   into for testing.)
+
+   It must be a **binding**, not a variable of that name typed into "Variables
+   and Secrets". The route checks, and answers 503 rather than 500 if it is the
+   wrong kind.
 4. Confirm the catalogue bucket's public hostname serves `catalogue/picks.json`
    (it is written beside `catalogue/meta.json`, outside `catalogue/g<N>/`, so the
    14-day lifecycle rule on the `catalogue/g` prefix does not match it).
+
+**The portal cannot save until the first catalogue has been published to R2.**
+Before any write it asks the bound bucket for `catalogue/meta.json` — the object
+the sync worker writes last on every publish (ADR-0034 §3) — and refuses with 503
+if it is not there. That is what stops a binding aimed at the wrong bucket, or at
+an empty one, from being seeded with a picks object nothing will ever read. Until
+the worker's first R2 publish, `/admin` opens and lets you build groups, and the
+save returns "CATALOGUE_BUCKET does not contain catalogue/meta.json".
 
 Then open `/admin`, sign in through Access, and save. A pin already in the live
 generation appears on the site within about a minute; one that is not yet

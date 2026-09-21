@@ -31,7 +31,7 @@
  */
 
 import { authoriseAccessRequest, type AccessFailure } from '../_lib/accessJwt'
-import { judgeChannel, loadIptvIndex } from '../_lib/iptvOrg'
+import { indexAgeMinutes, isIndexStale, judgeChannel, loadIptvIndex } from '../_lib/iptvOrg'
 import {
   historyKeySegment,
   LIMITS,
@@ -51,6 +51,18 @@ const PICKS_CACHE_CONTROL = 'public, max-age=60, stale-while-revalidate=300'
 /** If a history key is somehow taken, try this many suffixes before giving up. Never overwrite. */
 const HISTORY_SUFFIX_TRIES = 5
 
+/**
+ * One object the bucket the portal is allowed to write must already contain.
+ *
+ * Before any write, the binding is asked for this key. A bucket that does not
+ * hold it is not the catalogue bucket — it is `channel-icons`, or an empty
+ * bucket created by a typo — and the portal refuses rather than seeding
+ * `catalogue/picks.json` into it. The sync worker writes `meta.json` last on
+ * every publish (ADR-0034 §3), so its presence is exactly "this bucket has had a
+ * catalogue published into it".
+ */
+const BUCKET_PROOF_KEY = 'catalogue/meta.json'
+
 interface R2Object {
   httpEtag: string
   size?: number
@@ -58,21 +70,24 @@ interface R2Object {
   text: () => Promise<string>
 }
 
+interface PutOptions {
+  httpMetadata?: { contentType?: string; cacheControl?: string }
+  onlyIf?: { etagMatches?: string; etagDoesNotMatch?: string }
+}
+
 /**
- * Read-and-append surface of the catalogue bucket. There is deliberately no
- * `delete`: the binding cannot retire anything from this route.
+ * Read-and-append surface of the catalogue bucket.
+ *
+ * There is deliberately no `delete`. That used to be a type-only claim, which a
+ * compiled Function does not enforce: `(bucket as any).delete(...)` would have
+ * run. `bindBucket` below now returns a facade holding only these three methods,
+ * so the underlying binding's `delete` is not reachable from this module at
+ * runtime either (backend CLAUDE.md, "retire by flag, never delete").
  */
 interface CatalogueBucket {
   get: (key: string) => Promise<R2Object | null>
   head: (key: string) => Promise<{ key: string } | null>
-  put: (
-    key: string,
-    value: string,
-    options?: {
-      httpMetadata?: { contentType?: string; cacheControl?: string }
-      onlyIf?: { etagMatches?: string }
-    },
-  ) => Promise<{ httpEtag: string } | null>
+  put: (key: string, value: string, options?: PutOptions) => Promise<{ httpEtag: string } | null>
 }
 
 const json = (body: unknown, status: number, headers: Record<string, string> = {}): Response =>
@@ -91,26 +106,55 @@ const json = (body: unknown, status: number, headers: Record<string, string> = {
 /**
  * Turns an authorisation failure into a response.
  *
- * The reason tag is returned because it names no secret and makes a
- * misconfiguration diagnosable without a log; the 503 cases say what is missing
- * so the owner can fix them in a minute.
+ * The body is deliberately generic. Everyone who reaches this branch is
+ * *unauthenticated* — they have not proved they are the owner — so they are told
+ * only that the request was refused, never which check refused it, which
+ * environment variable is missing, or that the project runs on Pages at all. The
+ * precise reason goes to the log, where the owner can read it and a stranger
+ * cannot; the setup guidance lives in README.md.
  */
 function refuse(failure: AccessFailure): Response {
-  const detail =
-    failure.reason === 'access-not-configured'
-      ? 'Set CF_ACCESS_TEAM_DOMAIN and CF_ACCESS_AUD on the Pages project. Until then this route writes nothing.'
-      : failure.reason === 'jwks-unavailable'
-        ? 'The Access signing keys could not be read, so this request cannot be authorised.'
-        : undefined
-  return json({ error: 'unauthorised', reason: failure.reason, detail }, failure.status)
+  console.warn(`[picks] request refused: ${failure.status} ${failure.reason}`)
+  if (failure.status === 503) return json({ error: 'unavailable' }, 503)
+  return json({ error: 'unauthorised' }, failure.status)
 }
 
 /** `W/"abc"` and `"abc"` name the same object; compare them the same way. */
 const stripWeak = (etag: string): string => etag.replace(/^W\//, '').trim()
 
-function readBucket(env: unknown): CatalogueBucket | null {
-  const bucket = (env as { CATALOGUE_BUCKET?: unknown } | undefined)?.CATALOGUE_BUCKET
-  return bucket ? (bucket as CatalogueBucket) : null
+/**
+ * A three-method facade over the `CATALOGUE_BUCKET` binding, or null.
+ *
+ * Two jobs:
+ *
+ *  1. **Check it is a binding at all.** A truthiness test passes for a plain
+ *     environment *variable* of the same name — a string the owner typed into
+ *     "Variables and Secrets" instead of adding under "Bindings" — and the route
+ *     would then throw on `.get` and answer 500. Requiring the three methods
+ *     turns that into the 503 it should be.
+ *  2. **Drop `delete`.** The returned object holds only `get`, `head` and `put`,
+ *     so nothing in this module can reach the binding's `delete`, whatever a
+ *     later edit or a cast tries.
+ */
+export function bindBucket(env: unknown): CatalogueBucket | null {
+  const raw = (env as { CATALOGUE_BUCKET?: unknown } | undefined)?.CATALOGUE_BUCKET
+  if (typeof raw !== 'object' || raw === null) return null
+
+  const source = raw as Record<string, unknown>
+  const { get, head, put } = source
+  if (typeof get !== 'function' || typeof head !== 'function' || typeof put !== 'function') return null
+
+  return {
+    get: (key) => (get as (k: string) => Promise<R2Object | null>).call(source, key),
+    head: (key) => (head as (k: string) => Promise<{ key: string } | null>).call(source, key),
+    put: (key, value, options) =>
+      (put as (k: string, v: string, o?: PutOptions) => Promise<{ httpEtag: string } | null>).call(
+        source,
+        key,
+        value,
+        options,
+      ),
+  }
 }
 
 /** The stored document, or null when the object is absent or unreadable. */
@@ -200,8 +244,35 @@ async function handleWrite(request: Request, bucket: CatalogueBucket): Promise<R
     )
   }
 
+  // Prove the binding points at the catalogue bucket before writing into it.
+  // A binding aimed at `channel-icons` (whose route is public) or at an empty
+  // bucket would otherwise be seeded with a picks object nothing reads.
+  let proof: { key: string } | null
+  try {
+    proof = await bucket.head(BUCKET_PROOF_KEY)
+  } catch {
+    proof = null
+  }
+  if (!proof) {
+    return json(
+      {
+        error: 'wrong-bucket',
+        detail:
+          `CATALOGUE_BUCKET does not contain ${BUCKET_PROOF_KEY}, so it is not the catalogue bucket ` +
+          '(or no catalogue has been published to it yet). Nothing was written.',
+      },
+      503,
+    )
+  }
+
   const refusals: string[] = []
   const warnings: string[] = []
+  if (isIndexStale(index)) {
+    const minutes = indexAgeMinutes(index)
+    warnings.push(
+      `The iptv-org list could not be refreshed; these ids were checked against a copy ${Math.floor(minutes / 60)}h ${minutes % 60}m old.`,
+    )
+  }
   for (const channelId of pinnedIds(validated.value)) {
     const verdict = judgeChannel(index, channelId)
     if (verdict.verdict === 'refuse') refusals.push(verdict.reason)
@@ -268,10 +339,17 @@ async function handleWrite(request: Request, bucket: CatalogueBucket): Promise<R
 /**
  * Writes `picks-history/<updatedAt>.json` without ever overwriting.
  *
+ * The write is conditional — `If-None-Match: *`, which R2 spells
+ * `onlyIf: { etagDoesNotMatch: '*' }` — so the store itself refuses a key that
+ * already exists. A head-then-put would have been a check and a write with a gap
+ * between them: two saves in the same millisecond both see "absent" and the
+ * second silently replaces the first, which is precisely what "append-only"
+ * must not allow. Here the loser gets null back and retries under a suffix.
+ *
  * Returns the key written, or null if every candidate was taken or the store
  * refused. Nothing is deleted and nothing is replaced under any outcome.
  */
-async function writeHistory(
+export async function writeHistory(
   bucket: CatalogueBucket,
   updatedAt: string,
   body: string,
@@ -280,14 +358,15 @@ async function writeHistory(
   for (let attempt = 0; attempt < HISTORY_SUFFIX_TRIES; attempt += 1) {
     const key = attempt === 0 ? `${base}.json` : `${base}-${attempt + 1}.json`
     try {
-      if (await bucket.head(key)) continue
-      await bucket.put(key, body, {
+      const written = await bucket.put(key, body, {
         httpMetadata: {
           contentType: 'application/json; charset=utf-8',
           cacheControl: 'public, max-age=31536000, immutable',
         },
+        onlyIf: { etagDoesNotMatch: '*' },
       })
-      return key
+      // Null means the key already existed: try the next suffix, never replace.
+      if (written) return key
     } catch {
       return null
     }
@@ -308,13 +387,14 @@ export const onRequest: PagesFunction = async (context) => {
     return json({ error: 'method-not-allowed' }, 405, { Allow: 'GET, PUT, POST' })
   }
 
-  const bucket = readBucket(env)
+  const bucket = bindBucket(env)
   if (!bucket) {
     return json(
       {
         error: 'storage-not-configured',
         detail:
-          'Bind the streamloom-catalogue R2 bucket as CATALOGUE_BUCKET on the Pages project. Nothing was written.',
+          'CATALOGUE_BUCKET is not an R2 bucket binding on this project (a plain variable of that ' +
+          'name is not one). Nothing was written.',
       },
       503,
     )

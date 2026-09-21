@@ -30,8 +30,11 @@ const json = (body: unknown, status: number): Response =>
     },
   })
 
+/** Generic by design; see the same function in ./index.ts. The reason goes to the log. */
 function refuse(failure: AccessFailure): Response {
-  return json({ error: 'unauthorised', reason: failure.reason }, failure.status)
+  console.warn(`[picks/channels] request refused: ${failure.status} ${failure.reason}`)
+  if (failure.status === 503) return json({ error: 'unavailable' }, 503)
+  return json({ error: 'unauthorised' }, failure.status)
 }
 
 /** A bounded, control-character-free parameter, or undefined. */
