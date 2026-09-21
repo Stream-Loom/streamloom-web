@@ -10,14 +10,20 @@ import { orderStreamsForPlayback, rankResolution } from '../util/resolution'
 import {
   getProxyStreamUrl,
   isMixedContent,
-  markStreamBroken,
   unmarkStreamBroken,
   tryUpgradeToHttps,
   getCachedWorkingStream,
   cacheWorkingStream,
   fetchEdgeVerifiedStreams,
   isAutoSkipEnabled,
+  hideChannel,
 } from '../util/stream'
+import {
+  classifyHlsError,
+  classifyMediaElementError,
+  recordStreamFailure,
+} from '../util/streamFailure'
+import type { FailureClass } from '../util/streamFailure'
 import './VideoPlayer.css'
 
 interface Props {
@@ -41,6 +47,13 @@ function getCurrentProgram(programs: EpgProgram[], nowMs: number): EpgProgram | 
   })
 }
 
+/** Why each candidate of one channel failed, so exhaustion can be judged as a whole. */
+interface FailureEvidence {
+  channelId: string
+  /** Class of the most recent failed attempt, per candidate index. */
+  verdicts: Map<number, FailureClass>
+}
+
 export function VideoPlayer({ channel, allChannels, returnTo = '/' }: Props) {
   const videoRef = useRef<HTMLVideoElement>(null)
   const containerRef = useRef<HTMLDivElement>(null)
@@ -55,6 +68,7 @@ export function VideoPlayer({ channel, allChannels, returnTo = '/' }: Props) {
   const [isFullscreen, setIsFullscreen] = useState(false)
   const [isBuffering, setIsBuffering] = useState(true)
   const [hasError, setHasError] = useState(false)
+  const [networkIssue, setNetworkIssue] = useState(false)
   const [isSlowConnecting, setIsSlowConnecting] = useState(false)
   const [toastMessage, setToastMessage] = useState<string | null>(null)
   const toastTimer = useRef<number | null>(null)
@@ -122,7 +136,8 @@ export function VideoPlayer({ channel, allChannels, returnTo = '/' }: Props) {
   const mediaRecoveryAttempts = useRef(0)
   const hasPlayedSuccessfully = useRef(false)
   const switchChannelCleanlyRef = useRef<(target: EnrichedChannel) => void>(() => {})
-  const failoverToNextAttemptRef = useRef<() => void>(() => {})
+  const failoverToNextAttemptRef = useRef<(cause: FailureClass) => void>(() => {})
+  const failureEvidenceRef = useRef<FailureEvidence | null>(null)
 
   if (channel.id !== prevChannelId) {
     setPrevChannelId(channel.id)
@@ -140,6 +155,7 @@ export function VideoPlayer({ channel, allChannels, returnTo = '/' }: Props) {
       : false
     setIsProxied(initProxy)
     setHasError(false)
+    setNetworkIssue(false)
     setIsBuffering(true)
     setIsSlowConnecting(false)
     setShowHud(true)
@@ -305,6 +321,17 @@ export function VideoPlayer({ channel, allChannels, returnTo = '/' }: Props) {
       sessionStorage.removeItem('sl_autoskip_start')
     }
   }, [])
+
+  // Leaving the player ends any pending auto-skip, including one still waiting on
+  // the connectivity check in failoverToNextAttempt.
+  const mountedRef = useRef(true)
+  useEffect(() => {
+    mountedRef.current = true
+    return () => {
+      mountedRef.current = false
+      cancelCountdown()
+    }
+  }, [cancelCountdown])
 
   useEffect(() => {
     function handleClickOutside(e: MouseEvent) {
@@ -514,6 +541,22 @@ export function VideoPlayer({ channel, allChannels, returnTo = '/' }: Props) {
     navigate(returnTo, { state: { targetChannelId: channel.id } })
   }, [cancelCountdown, channel.id, returnTo, navigate])
 
+  // The user's own choice to drop this channel from every list; undone in Settings.
+  const handleHideChannel = useCallback(() => {
+    cancelCountdown()
+    const current = channelRef.current
+    const playlist = allChannelsRef.current
+    const pos = playlist.findIndex((c) => c.id === current.id)
+    const next = playlist.length > 1 ? playlist[(pos + 1) % playlist.length] : null
+    hideChannel(current.id)
+    if (next && next.id !== current.id) {
+      showToast(`${current.name} hidden · restore it in Settings`, 3500)
+      switchChannelCleanly(next)
+    } else {
+      handleBack()
+    }
+  }, [cancelCountdown, showToast, switchChannelCleanly, handleBack])
+
   const targetChannelIdRef = useRef(channel.id)
 
   useEffect(() => {
@@ -588,7 +631,7 @@ export function VideoPlayer({ channel, allChannels, returnTo = '/' }: Props) {
     }
   }, [allChannels, switchChannelCleanly])
 
-  const failoverToNextAttempt = useCallback(() => {
+  const failoverToNextAttempt = useCallback((cause: FailureClass) => {
     if (failoverTimer.current) {
       window.clearTimeout(failoverTimer.current)
       failoverTimer.current = null
@@ -608,6 +651,13 @@ export function VideoPlayer({ channel, allChannels, returnTo = '/' }: Props) {
     const curUrl = curStream?.url
     const currentIsProxied = isProxiedRef.current
     const currentChannel = channelRef.current
+
+    let evidence = failureEvidenceRef.current
+    if (!evidence || evidence.channelId !== currentChannel.id) {
+      evidence = { channelId: currentChannel.id, verdicts: new Map() }
+      failureEvidenceRef.current = evidence
+    }
+    evidence.verdicts.set(curIdx, cause)
 
     // 1. If currently direct, retry via edge proxy
     if (!currentIsProxied && curUrl && !curUrl.startsWith('/api/proxy')) {
@@ -640,10 +690,8 @@ export function VideoPlayer({ channel, allChannels, returnTo = '/' }: Props) {
     setHasError(true)
     setIsBuffering(false)
     setIsSlowConnecting(false)
-    markStreamBroken(currentChannel.id)
 
-    // Check if auto-skip is enabled
-    if (isAutoSkipEnabled()) {
+    const skipToNext = () => {
       const playlist = allChannelsRef.current
       const curPos = playlist.findIndex((c) => c.id === currentChannel.id)
       let nextTarget: EnrichedChannel | null = null
@@ -658,29 +706,44 @@ export function VideoPlayer({ channel, allChannels, returnTo = '/' }: Props) {
         }
       }
 
-      if (nextTarget && nextTarget.id !== currentChannel.id) {
-        const autoSkipStart = sessionStorage.getItem('sl_autoskip_start')
-        if (autoSkipStart === nextTarget.id) {
-          // Loop guard: looped all the way back to the starting broken channel
-          sessionStorage.removeItem('sl_autoskip_start')
-          showToast('All channels in this playlist are currently unavailable', 3500)
-          return
-        }
-        if (!autoSkipStart) {
-          sessionStorage.setItem('sl_autoskip_start', currentChannel.id)
-        }
-
-        showToast(`⚠️ ${currentChannel.name} unavailable · Auto-skipping to ${nextTarget.name}…`, 3000)
-        setAutoSkipCountdown(1)
-        if (countdownTimerRef.current) window.clearTimeout(countdownTimerRef.current)
-        countdownTimerRef.current = window.setTimeout(() => {
-          countdownTimerRef.current = null
-          setAutoSkipCountdown(null)
-          switchChannelCleanlyRef.current(nextTarget!)
-        }, 1200)
+      if (!nextTarget || nextTarget.id === currentChannel.id) return
+      const autoSkipStart = sessionStorage.getItem('sl_autoskip_start')
+      if (autoSkipStart === nextTarget.id) {
+        // Loop guard: looped all the way back to the starting broken channel
+        sessionStorage.removeItem('sl_autoskip_start')
+        showToast('All channels in this playlist are currently unavailable', 3500)
         return
       }
+      if (!autoSkipStart) {
+        sessionStorage.setItem('sl_autoskip_start', currentChannel.id)
+      }
+
+      showToast(`⚠️ ${currentChannel.name} unavailable · Auto-skipping to ${nextTarget.name}…`, 3000)
+      setAutoSkipCountdown(1)
+      if (countdownTimerRef.current) window.clearTimeout(countdownTimerRef.current)
+      countdownTimerRef.current = window.setTimeout(() => {
+        countdownTimerRef.current = null
+        setAutoSkipCountdown(null)
+        switchChannelCleanlyRef.current(nextTarget)
+      }, 1200)
     }
+
+    // The channel is flagged only for stream-specific failures with the user's
+    // connection confirmed working; auto-skip likewise needs a working connection,
+    // so an outage on the user's side never walks them through the playlist.
+    void recordStreamFailure(
+      currentChannel.id,
+      evidence.verdicts,
+      streams.length,
+      () => failureEvidenceRef.current === evidence
+    ).then(({ reachable }) => {
+      if (!mountedRef.current || failureEvidenceRef.current !== evidence) return
+      if (!reachable) {
+        setNetworkIssue(true)
+        return
+      }
+      if (isAutoSkipEnabled() && channelRef.current.id === currentChannel.id) skipToNext()
+    })
   }, [showToast])
 
   useEffect(() => {
@@ -700,6 +763,8 @@ export function VideoPlayer({ channel, allChannels, returnTo = '/' }: Props) {
     hasPlayedSuccessfully.current = false
     isProxiedRef.current = nextUseProxy
     setIsProxied(nextUseProxy)
+    failureEvidenceRef.current = null
+    setNetworkIssue(false)
     setHasError(false)
     setIsBuffering(true)
     setIsSlowConnecting(false)
@@ -708,6 +773,8 @@ export function VideoPlayer({ channel, allChannels, returnTo = '/' }: Props) {
 
   const handleRetry = useCallback(() => {
     cancelCountdown()
+    failureEvidenceRef.current = null
+    setNetworkIssue(false)
     setHasError(false)
     setIsBuffering(true)
     setIsSlowConnecting(false)
@@ -731,7 +798,7 @@ export function VideoPlayer({ channel, allChannels, returnTo = '/' }: Props) {
     const rawUrl = stream?.url
     if (!rawUrl) {
       window.queueMicrotask(() => {
-        failoverToNextAttemptRef.current()
+        failoverToNextAttemptRef.current('inconclusive')
       })
       return
     }
@@ -752,7 +819,7 @@ export function VideoPlayer({ channel, allChannels, returnTo = '/' }: Props) {
     // Failover watchdog timer: if stream not parsed / buffered in 7s, trigger failover
     failoverTimer.current = window.setTimeout(() => {
       if (!isDisposed) {
-        failoverToNextAttemptRef.current()
+        failoverToNextAttemptRef.current('inconclusive')
       }
     }, 7000)
 
@@ -775,6 +842,7 @@ export function VideoPlayer({ channel, allChannels, returnTo = '/' }: Props) {
       setIsBuffering(false)
       setIsSlowConnecting(false)
       setHasError(false)
+      failureEvidenceRef.current = null
       unmarkStreamBroken(channel.id)
       const playedStream = channelStreamsRef.current[activeStreamIdxRef.current]
       cacheWorkingStream(channel.id, rawUrl, isProxied, playedStream?.quality)
@@ -999,12 +1067,12 @@ export function VideoPlayer({ channel, allChannels, returnTo = '/' }: Props) {
                 mediaRecoveryAttempts.current++
                 hls.recoverMediaError()
               } else {
-                failoverToNextAttemptRef.current()
+                failoverToNextAttemptRef.current(classifyHlsError(data))
               }
               break
             case Hls.ErrorTypes.NETWORK_ERROR:
             default:
-              failoverToNextAttemptRef.current()
+              failoverToNextAttemptRef.current(classifyHlsError(data))
               break
           }
         }
@@ -1029,7 +1097,7 @@ export function VideoPlayer({ channel, allChannels, returnTo = '/' }: Props) {
             window.clearTimeout(failoverTimer.current)
             failoverTimer.current = null
           }
-          failoverToNextAttemptRef.current()
+          failoverToNextAttemptRef.current(classifyMediaElementError(video.error?.code))
         }
       }
     }
@@ -1191,7 +1259,7 @@ export function VideoPlayer({ channel, allChannels, returnTo = '/' }: Props) {
           if (hasPlayedSuccessfully.current && !stallTimer.current) {
             stallTimer.current = window.setTimeout(() => {
               stallTimer.current = null
-              failoverToNextAttemptRef.current()
+              failoverToNextAttemptRef.current('inconclusive')
             }, 8000)
           }
         }}
@@ -1213,6 +1281,7 @@ export function VideoPlayer({ channel, allChannels, returnTo = '/' }: Props) {
           setIsBuffering(false)
           setIsSlowConnecting(false)
           setHasError(false)
+          failureEvidenceRef.current = null
           setIsPlaying(true)
           unmarkStreamBroken(channel.id)
           const curStream = channelStreams[activeStreamIdx] || channel.stream
@@ -1263,6 +1332,15 @@ export function VideoPlayer({ channel, allChannels, returnTo = '/' }: Props) {
                 Retry ↺
               </button>
             )}
+            {isSlowConnecting && (
+              <button
+                className="player__overlay-btn"
+                onClick={handleHideChannel}
+                aria-label="Hide this channel"
+              >
+                Hide Channel 🚫
+              </button>
+            )}
             <button
               className="player__overlay-btn player__overlay-btn--back"
               onClick={handleBack}
@@ -1288,7 +1366,9 @@ export function VideoPlayer({ channel, allChannels, returnTo = '/' }: Props) {
           <div className="player__connecting-content">
             <p className="player__connecting-title">⚠️ Stream Unavailable</p>
             <p className="player__connecting-sub">
-              {channelStreams.length > 1
+              {networkIssue
+                ? 'Your connection appears to be down, so this channel has not been marked unavailable. Retry once you are back online.'
+                : channelStreams.length > 1
                 ? `Tried all ${channelStreams.length} stream candidates directly and via edge proxy.`
                 : isProxied
                 ? 'Unable to connect directly or via edge proxy.'
@@ -1322,6 +1402,13 @@ export function VideoPlayer({ channel, allChannels, returnTo = '/' }: Props) {
                 Alternate Stream ({activeStreamIdx + 1}/{channelStreams.length})
               </button>
             )}
+            <button
+              className="player__overlay-btn"
+              onClick={handleHideChannel}
+              aria-label="Hide this channel"
+            >
+              Hide Channel 🚫
+            </button>
             {nextChannel && (
               <button
                 className="player__overlay-btn player__overlay-btn--skip"
@@ -1400,6 +1487,14 @@ export function VideoPlayer({ channel, allChannels, returnTo = '/' }: Props) {
             aria-label={fav ? 'Remove from favourites' : 'Add to favourites'}
           >
             {fav ? '♥' : '♡'}
+          </button>
+          <button
+            className="player__fav-btn"
+            onClick={handleHideChannel}
+            aria-label="Hide this channel"
+            title="Hide this channel (restore in Settings)"
+          >
+            🚫
           </button>
         </div>
       </div>

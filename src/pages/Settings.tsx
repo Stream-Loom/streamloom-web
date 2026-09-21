@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useMemo } from 'react'
 import { useChannels, clearCatalogueCache } from '../hooks/useChannels'
 import { useTheme } from '../hooks/useTheme'
 import {
@@ -9,6 +9,9 @@ import {
   setHideBrokenStreamsEnabled,
   isAutoSkipEnabled,
   setAutoSkipEnabled,
+  getHiddenSet,
+  unhideChannel,
+  clearHiddenChannels,
   onStreamStateChange,
 } from '../util/stream'
 import './Settings.css'
@@ -22,16 +25,24 @@ export function Settings() {
   const [autoSkip, setAutoSkip] = useState(() => isAutoSkipEnabled())
   const [hideBroken, setHideBroken] = useState(() => isHideBrokenStreamsEnabled())
   const [brokenCount, setBrokenCount] = useState(() => getBrokenCount())
+  const [hiddenIds, setHiddenIds] = useState(() => [...getHiddenSet()])
   const [clearedNotice, setClearedNotice] = useState(false)
   const [clearedBrokenNotice, setClearedBrokenNotice] = useState(false)
 
   useEffect(() => {
     return onStreamStateChange(() => {
       setBrokenCount(getBrokenCount())
+      setHiddenIds([...getHiddenSet()])
       setHideBroken(isHideBrokenStreamsEnabled())
       setAutoSkip(isAutoSkipEnabled())
     })
   }, [])
+
+  // Channel names come from the unfiltered catalogue, since hidden ones are not in `channels`.
+  const hiddenNames = useMemo(() => {
+    const wanted = new Set(hiddenIds)
+    return new Map((allChannels ?? []).filter((c) => wanted.has(c.id)).map((c) => [c.id, c.name]))
+  }, [allChannels, hiddenIds])
 
   const handleLowLatencyChange = (enabled: boolean) => {
     setLowLatency(enabled)
@@ -202,7 +213,7 @@ export function Settings() {
               <div className="settings-item__info">
                 <strong>Cached Channels</strong>
                 <span>
-                  {channels.length} {hideBroken && allChannels && allChannels.length !== channels.length ? `visible (${allChannels.length} total)` : 'channels'} indexed locally
+                  {channels.length} {allChannels && allChannels.length !== channels.length ? `visible (${allChannels.length} total)` : 'channels'} indexed locally
                 </span>
               </div>
               <button
@@ -212,6 +223,42 @@ export function Settings() {
               >
                 {clearedNotice ? 'Cleared!' : 'Clear Cache'}
               </button>
+            </div>
+
+            <div className="settings-item settings-item--stacked">
+              <div className="settings-item__row">
+                <div className="settings-item__info">
+                  <strong>Hidden Channels</strong>
+                  <span>
+                    {hiddenIds.length === 0
+                      ? 'None. Hide a channel from the player to remove it from every list.'
+                      : `${hiddenIds.length} hidden by you, always kept out of lists`}
+                  </span>
+                </div>
+                <button
+                  className="settings-btn"
+                  onClick={clearHiddenChannels}
+                  disabled={hiddenIds.length === 0}
+                >
+                  Restore All
+                </button>
+              </div>
+              {hiddenIds.length > 0 && (
+                <ul className="settings-hidden-list">
+                  {hiddenIds.map((id) => (
+                    <li key={id} className="settings-hidden-list__item">
+                      <span>{hiddenNames.get(id) ?? id}</span>
+                      <button
+                        className="settings-btn settings-btn--sm"
+                        onClick={() => unhideChannel(id)}
+                        aria-label={`Restore ${hiddenNames.get(id) ?? id}`}
+                      >
+                        Restore
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              )}
             </div>
 
             <div className="settings-item">

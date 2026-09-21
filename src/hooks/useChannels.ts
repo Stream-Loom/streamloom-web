@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallback } from 'react'
+import { useEffect, useState, useCallback, useMemo } from 'react'
 import type { Category, EnrichedChannel, EpgProgram } from '../api/types'
 import {
   fetchCatalogueFromRedis,
@@ -23,6 +23,7 @@ import {
   fetchEdgeVerifiedStreams,
   fetchKnownStreams,
   getBrokenSet,
+  getHiddenSet,
   getWorkingMapSnapshot,
   isHideBrokenStreamsEnabled,
   onStreamStateChange,
@@ -420,6 +421,8 @@ function startRefreshLoop() {
 
 startRefreshLoop()
 
+const NO_CHANNELS: EnrichedChannel[] = []
+
 export function useChannels(): UseChannelsResult {
   const [, setTick] = useState(0)
 
@@ -436,12 +439,19 @@ export function useChannels(): UseChannelsResult {
   }, [])
   const refreshEpg = useCallback(() => refreshEpgIds(), [])
 
-  const raw = _channels ?? []
+  const raw = _channels ?? NO_CHANNELS
   const hideBroken = isHideBrokenStreamsEnabled()
-  const brokenSet = getBrokenSet()
-  const filtered = hideBroken && brokenSet.size > 0
-    ? raw.filter((c) => !brokenSet.has(c.id))
-    : raw
+  const brokenSet = hideBroken ? getBrokenSet() : null
+  const hiddenSet = getHiddenSet()
+  // Broken marks hide only while the setting is on; a channel the user hid stays hidden.
+  // Memoised on the sets' identity so consumers' memos keep their cache between renders.
+  const filtered = useMemo(
+    () =>
+      (brokenSet && brokenSet.size > 0) || hiddenSet.size > 0
+        ? raw.filter((c) => !hiddenSet.has(c.id) && !brokenSet?.has(c.id))
+        : raw,
+    [raw, brokenSet, hiddenSet]
+  )
 
   return {
     channels: filtered,

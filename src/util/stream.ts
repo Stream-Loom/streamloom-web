@@ -11,6 +11,20 @@ try {
   localStorage.removeItem('sl_broken_streams_v1')
 } catch {}
 
+/**
+ * Marks written before failures were classified (see streamFailure.ts) may have
+ * come from the user's own network dropping, so they cannot be trusted. Drop
+ * them once; the versioned key stops this from running again, and bumping the
+ * version re-runs it if a later change invalidates marks the same way.
+ */
+const BROKEN_RESET_KEY = 'sl_broken_reset_v1'
+try {
+  if (!localStorage.getItem(BROKEN_RESET_KEY)) {
+    localStorage.removeItem(BROKEN_STREAMS_KEY)
+    localStorage.setItem(BROKEN_RESET_KEY, '1')
+  }
+} catch {}
+
 interface BrokenRecord {
   timestamp: number
 }
@@ -54,12 +68,13 @@ export function notifyStreamStateChange() {
   })
 }
 
+/** Off unless the user turned it on: a channel is hidden only by an explicit choice. */
 export function isHideBrokenStreamsEnabled(): boolean {
   if (_cachedHideBroken !== null) return _cachedHideBroken
   try {
-    _cachedHideBroken = localStorage.getItem(HIDE_BROKEN_KEY) !== 'false'
+    _cachedHideBroken = localStorage.getItem(HIDE_BROKEN_KEY) === 'true'
   } catch {
-    _cachedHideBroken = true
+    _cachedHideBroken = false
   }
   return _cachedHideBroken
 }
@@ -104,6 +119,10 @@ export function isStreamBroken(channelId: string): boolean {
   return getBrokenSet().has(channelId)
 }
 
+/**
+ * Low-level writer. Play failures must go through `recordStreamFailure`
+ * (streamFailure.ts), which only calls this for stream-specific evidence.
+ */
 export function markStreamBroken(channelId: string) {
   try {
     const map = getBrokenMap()
@@ -143,6 +162,73 @@ export function clearBrokenStreams() {
   } catch {
     // ignore
   }
+}
+
+// ---- User-hidden channels ----
+// A channel the user chose to hide. Unlike a broken mark this is an explicit
+// choice, so it never expires, is not touched by the broken-mark purge or the
+// cache reset, and applies whether or not "hide failed channels" is on.
+const HIDDEN_CHANNELS_KEY = 'sl_hidden_channels_v1'
+let _cachedHiddenSet: Set<string> | null = null
+
+function readHiddenFromStorage(): Set<string> {
+  let ids: string[] = []
+  try {
+    const parsed: unknown = JSON.parse(localStorage.getItem(HIDDEN_CHANNELS_KEY) ?? '[]')
+    if (Array.isArray(parsed)) ids = parsed.filter((id): id is string => typeof id === 'string')
+  } catch {
+    // unreadable value: treat as nothing hidden
+  }
+  return new Set(ids)
+}
+
+export function getHiddenSet(): Set<string> {
+  if (!_cachedHiddenSet) _cachedHiddenSet = readHiddenFromStorage()
+  return _cachedHiddenSet
+}
+
+// Another tab changed the list: drop the cache so the next read sees it.
+try {
+  window.addEventListener('storage', (e) => {
+    if (e.key !== HIDDEN_CHANNELS_KEY) return
+    _cachedHiddenSet = null
+    notifyStreamStateChange()
+  })
+} catch {}
+
+function saveHiddenSet(set: Set<string>) {
+  _cachedHiddenSet = set
+  try {
+    localStorage.setItem(HIDDEN_CHANNELS_KEY, JSON.stringify([...set]))
+  } catch {
+    // ignore quota: stays hidden for this session
+  }
+  notifyStreamStateChange()
+}
+
+export function isChannelHidden(channelId: string): boolean {
+  return getHiddenSet().has(channelId)
+}
+
+// Read-modify-write starts from storage, not the cache, so a change made in
+// another tab is merged rather than overwritten.
+export function hideChannel(channelId: string) {
+  const current = readHiddenFromStorage()
+  if (current.has(channelId)) {
+    _cachedHiddenSet = current
+    return
+  }
+  saveHiddenSet(current.add(channelId))
+}
+
+export function unhideChannel(channelId: string) {
+  const current = readHiddenFromStorage()
+  if (!current.delete(channelId)) return
+  saveHiddenSet(current)
+}
+
+export function clearHiddenChannels() {
+  saveHiddenSet(new Set())
 }
 
 // ---- Verified Working Streams Cache ----
