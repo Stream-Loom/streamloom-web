@@ -43,16 +43,26 @@ npm run preview      # Preview production build locally
 
 ```
 streamloom-web/
-├── functions/api/proxy.ts    # Cloudflare Pages Edge Function for M3U8 rewriting & CORS proxying
+├── functions/api/            # Cloudflare Pages Functions (the only server-side code)
+│   ├── proxy.ts              # M3U8 rewriting & CORS proxying
+│   ├── streams/              # Edge stream verification (resolution-ranked probe)
+│   ├── icons/[channelId].ts  # READ-ONLY view of the channel-icons bucket (WO-01 closed its write path)
+│   ├── picks/index.ts        # Author's picks: GET / PUT, behind a verified Access JWT (ADR-0033)
+│   ├── picks/channels.ts     # Picker search over the iptv-org list, same Access gate
+│   └── _lib/                 # Shared, non-routed: accessJwt.ts, picksSchema.ts, iptvOrg.ts
 ├── public/
-│   ├── _headers              # Cloudflare Pages security & caching headers
-│   └── _redirects            # SPA fallback (/* /index.html 200)
+│   └── _headers              # Security & cache headers; /admin is noindex + no-store
 ├── src/
 │   ├── api/
-│   │   ├── redis.ts          # Upstash Redis REST read-only client (ADR-0015 edge catalogue cache)
+│   │   ├── r2.ts             # R2 snapshot client — the PRIMARY catalogue read path (ADR-0030)
+│   │   ├── r2Contract.ts     # Object layout, meta/row/picks decoding (pure; shared with the golden test)
+│   │   ├── catalogueSource.ts# Picks the store: R2 first, Redis on any miss or timeout
+│   │   ├── redis.ts          # Upstash Redis REST read-only client — the FALLBACK (ADR-0015)
 │   │   └── types.ts          # Catalogue + EPG payload types (erased at build)
 │   ├── components/
 │   │   ├── ChannelCard.tsx   # Channel card with thumbnail, country, resolution badges
+│   │   ├── CategoryRow.tsx   # Horizontal genre rail with deferred card mounting
+│   │   ├── PicksRow.tsx      # Author's picks rail; never filtered by a broken mark (ADR-0033)
 │   │   ├── HeroSection.tsx   # Featured banner with instant playback
 │   │   ├── Navbar.tsx        # Top navigation, search, and category filters
 │   │   └── VideoPlayer.tsx   # HLS.js video engine, failover watchdog, TV remote navigation
@@ -62,14 +72,39 @@ streamloom-web/
 │   │   ├── Home.tsx          # Channel grid, category rails, continue watching
 │   │   ├── Guide.tsx         # EPG timeline guide
 │   │   ├── Watch.tsx         # Video playback route with playlist memory
-│   │   └── Settings.tsx      # Low-latency, auto-skip, hide-broken toggles, cache reset
+│   │   ├── Settings.tsx      # Low-latency, auto-skip, hide-broken toggles, cache reset
+│   │   └── Admin.tsx         # UNLISTED picks portal at /admin (lazy chunk, behind Cloudflare Access)
 │   ├── util/
 │   │   ├── resolution.ts     # Resolution ranking + resolution-first candidate ordering
 │   │   ├── stream.ts         # Edge proxy URL generator, working stream cache, broken stream registry
+│   │   ├── streamFailure.ts  # Classifies a failed attempt: stream / network / inconclusive
+│   │   ├── catalogueStore.ts # IndexedDB persistence of the catalogue and schedules by generation
 │   │   ├── country.ts        # Country code to flag/name formatting
 │   │   └── shortcuts.ts      # Keyboard navigation helpers
 │   └── vite.config.ts        # Vite config with dev streamProxyPlugin mirroring Cloudflare Edge Function
 ```
+
+### Where the data comes from
+
+| | Store | Written by | Read by the browser |
+|---|---|---|---|
+| Catalogue, EPG | **R2 snapshots** (`catalogue/g<N>/…`, ADR-0030/0034) | the sync worker, from the backend repo | `src/api/r2.ts`, first |
+| Catalogue, EPG | Upstash Redis (ADR-0015) | the same worker | `src/api/redis.ts`, only when R2 cannot serve |
+| Author's picks | **R2** (`catalogue/picks.json`, ADR-0033) | **this project**, through the `CATALOGUE_BUCKET` binding | `fetchPicksFromR2` |
+| Icons | R2 (`channel-icons`) | the backend icon pipeline (ADR-0019) | `/api/icons/:id`, read-only |
+
+Supabase is never called from the browser, and **no Supabase key or Upstash write token
+belongs in this repository** (backend `CLAUDE.md`, "Secrets"). The project's only write
+capability is the R2 binding on `/api/picks` — never an API token, never a `VITE_` variable.
+
+### How this project is deployed
+
+It is a **Cloudflare Pages** project. `wrangler.jsonc` here has no `pages_build_output_dir`,
+which is what would make it the source of truth, so it applies to `wrangler pages dev` only:
+**the deployed project reads its bindings and variables from the Cloudflare dashboard**
+(Workers & Pages → `streamloomweb` → Settings). A binding added to `wrangler.jsonc` has no
+effect on production until it is added in the dashboard as well, and adding
+`pages_build_output_dir` would discard every setting currently held there.
 
 ---
 
@@ -109,12 +144,42 @@ streamloom-web/
 - `testBandwidth: false` plus `startFragPrefetch` and `abrEwmaDefaultEstimate: 5 Mbps` avoid an ABR ramp-up from low quality on fast connections.
 - `VideoPlayer.tsx` warms the next channel's resolved manifest with a `priority: 'low'` fetch 1.5 s after playback starts, so the browser and edge cache are primed before the user switches.
 
-### 4. Redis Read Budget
-- **Rule**: every Upstash read is metered, and the read-only token is public. Read only what is on screen, and never re-download what has not changed.
-- The catalogue is compared by generation first: `loadData` reads `catalogue:meta` (`fetchCatalogueMeta`, one GET, concurrent callers share it) and skips the download when the stored generation matches. The stored record carries its `generation`; the worker receives the `meta` already read, so it does not read it again.
+### 4. Catalogue Read Path & Read Budget
+- **Rule**: **R2 first, Redis only as a fallback** (ADR-0030). `catalogueSource.ts` asks `r2.ts`
+  for `catalogue/meta.json` and the generation's objects; on any miss, malformed object, 5xx or
+  timeout it falls through to `redis.ts` and puts R2 into a 30-second cooldown so a dead CDN
+  costs one timeout rather than one per request. Nothing in `r2.ts` throws.
+- **Rule**: every Upstash read is metered, and the read-only token is public. Read only what is on screen, and never re-download what has not changed. R2 reads are not metered per request, but the generation comparison below applies to both stores.
+- `VITE_CATALOGUE_R2_BASE_URL` is required: `scripts/check-env.mjs` fails the build without it, because Vite inlines it and a missing value ships a bundle that silently reads nothing.
+- The catalogue is compared by generation first: `loadData` reads the meta object (one small GET, concurrent callers share it) and skips the download when the stored generation matches. The stored record carries its `generation`; the worker receives the `meta` already read, so it does not read it again.
 - The guide (`EpgGuide.tsx`) fetches schedules only for rows in or just beyond the viewport, after scrolling settles. Never re-introduce a timer that prefetches every guide channel.
 - Schedules are persisted in the `schedules` object store of the same IndexedDB (`catalogueStore.ts`), keyed by `<generation>:<channelId>`, and read by `scheduleLoader.ts` before Redis. An entry expires when every programme has ended or the generation changes; a write also drops other generations.
 - `e2e/guide-requests.spec.ts` counts reads against an in-process Upstash mock (`e2e/support/upstashMock.ts`) and fails on a regression. Do not use `MGET` until it is confirmed to bill as one command.
+
+### 5. The Author's Picks and the Only Write Path
+
+- **Rule**: a pinned channel is shown **whether or not it plays** (ADR-0033 §3). `PicksRow` reads
+  `allChannels` — the list *before* the hidden and broken filters — and never consults
+  `getBrokenSet`, `getHiddenSet` or the hide-broken / auto-skip settings. **The pin wins.** A pin
+  with no stream shows "No stream available"; a group is hidden only when it is empty. Any read
+  error renders the row not at all. The WO-11 failure rules are untouched: a pinned channel still
+  records and marks its failures, the mark simply does not remove it from this row.
+- **Rule**: `/api/picks` verifies the `Cf-Access-Jwt-Assertion` JWT **itself** —
+  signature against the team's JWKS, `kid`, RS256 only, `aud`, `iss`, `exp`/`nbf` — so a
+  misconfigured or deleted Access application cannot expose the write. The URL path, the `Origin`
+  header and every other client-settable value take no part in the decision.
+- **Rule**: **fail closed.** Missing `CF_ACCESS_TEAM_DOMAIN`/`CF_ACCESS_AUD`, an unreadable JWKS,
+  a missing `CATALOGUE_BUCKET` binding, or an unreachable iptv-org list each end the request with
+  503 and **write nothing**. Never add a route that is unauthenticated "for now".
+- Every `channelId` is checked against the public iptv-org list at save time; `blocklist.json`
+  entries and `is_nsfw` channels are refused, `closed`/`replaced_by` accepted with a warning.
+  `picks.json` is written with an `If-Match` ETag (a stale write is a 412 carrying the newer copy)
+  and every save also writes an append-only `picks-history/<updatedAt>.json` that is never
+  overwritten or deleted.
+- `/admin` is unlisted: no link, no sitemap, `noindex` and `no-store`. That is hygiene, not the
+  access control. There is deliberately **no Vite dev stand-in** for `/api/picks`, so the portal
+  works only where Access is in front of it; the handlers are tested directly in
+  `e2e/picks-endpoint.spec.ts` with a generated RSA keypair.
 
 ### 3. Keyboard & Smart TV Navigation
 - Navigation uses a single stable listener pattern with `onKeyRef` in `VideoPlayer.tsx` to ensure zero dropped keypresses.

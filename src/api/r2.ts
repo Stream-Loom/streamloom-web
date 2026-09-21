@@ -19,12 +19,14 @@ import {
   decodeCatalogue,
   decodeEpg,
   decodeEpgIds,
+  decodePicks,
   epgIdsUrl,
   epgUrl,
   metaUrl,
   parseMeta,
+  picksUrl,
 } from './r2Contract'
-import type { DecodedCatalogue, R2Meta } from './r2Contract'
+import type { DecodedCatalogue, PicksDocument, R2Meta } from './r2Contract'
 
 /** The CDN hostname the snapshot is served from. A build-time setting; never hard-coded. */
 const BASE_URL = (
@@ -45,6 +47,7 @@ const MAX_BYTES = 8 * 1024 * 1024
 export const R2_META_BUDGET_MS = 5_000
 export const R2_CATALOGUE_BUDGET_MS = 8_000
 export const R2_EPG_BUDGET_MS = 6_000
+export const R2_PICKS_BUDGET_MS = 4_000
 
 /**
  * After a transport failure of `meta.json` or a bulk object R2 is skipped for this
@@ -103,6 +106,51 @@ async function withBudget<T>(ms: number, fn: (ctl: AbortController) => Promise<T
   } finally {
     clearTimeout(timer)
   }
+}
+
+/** True when the snapshot host is configured at all; the picks row needs to know before it asks. */
+export const r2BaseUrl = (): string | null => (isR2Configured ? BASE_URL : null)
+
+/**
+ * The short cache ADR-0033 §7 asks for, in memory.
+ *
+ * It also makes the row cost one request per page load rather than one per mount:
+ * `StrictMode` mounts every effect twice in development, and a second row (or a
+ * remount on navigation) would otherwise re-read the object. A reload clears it,
+ * so a save is still visible within a minute.
+ */
+const PICKS_MEMO_MS = 60_000
+let picksMemo: { value: PicksDocument | null; until: number } | null = null
+let picksInFlight: Promise<PicksDocument | null> | null = null
+
+/**
+ * `catalogue/picks.json`: the author's picks (ADR-0033). Null on any failure, so
+ * the row renders nothing rather than a broken one.
+ *
+ * Generation-independent and small, so it is read on its own short cache rather
+ * than with a generation. A failure here is deliberately *not* reported as a
+ * transport failure: picks.json may simply never have been published, and one
+ * missing optional object must not put the whole catalogue path into cooldown.
+ */
+export async function fetchPicksFromR2(): Promise<PicksDocument | null> {
+  if (!available()) return null
+
+  const now = Date.now()
+  if (picksMemo && now < picksMemo.until) return picksMemo.value
+  if (picksInFlight) return picksInFlight
+
+  picksInFlight = withBudget(R2_PICKS_BUDGET_MS, async (ctl) =>
+    decodePicks(await getJson(picksUrl(BASE_URL), ctl, () => {})),
+  )
+    .then((value) => {
+      picksMemo = { value, until: Date.now() + PICKS_MEMO_MS }
+      return value
+    })
+    .finally(() => {
+      picksInFlight = null
+    })
+
+  return picksInFlight
 }
 
 /** `catalogue/meta.json`: which generation is live. One small GET. */

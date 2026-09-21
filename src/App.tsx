@@ -13,6 +13,18 @@ import { Settings } from './pages/Settings'
  */
 const Watch = lazy(() => import('./pages/Watch').then((m) => ({ default: m.Watch })))
 
+/*
+ * The picks portal (ADR-0033). Unlisted: nothing links to it, it is in no
+ * sitemap, and `public/_headers` serves it `noindex` and `no-store`. Lazy so the
+ * editor is a chunk of its own and never reaches a visitor who does not ask for
+ * it — and so the catalogue grid is not made slower by a page one person uses.
+ *
+ * Being unlisted is not the security control: Cloudflare Access is, and the
+ * Function behind `/api/picks` verifies the Access JWT itself, so this route
+ * being reachable gives nobody the ability to write anything.
+ */
+const Admin = lazy(() => import('./pages/Admin').then((m) => ({ default: m.Admin })))
+
 export default function App() {
   return (
     <BrowserRouter>
@@ -38,6 +50,14 @@ export default function App() {
                 <Route path="/guide" element={<Guide />} />
                 <Route path="/favourites" element={<Favorites />} />
                 <Route path="/settings" element={<Settings />} />
+                <Route
+                  path="/admin"
+                  element={
+                    <Suspense fallback={<div style={{ minHeight: '50dvh' }} />}>
+                      <Admin />
+                    </Suspense>
+                  }
+                />
                 <Route path="*" element={<Home />} />
               </Routes>
             </>

@@ -21,7 +21,15 @@ import type { CatalogueOptions } from './catalogueData'
 export const R2_MOCK_PORT = 5198
 export const R2_MOCK_BASE_URL = `http://127.0.0.1:${R2_MOCK_PORT}`
 
-export type R2Kind = 'meta' | 'channels' | 'streams' | 'categories' | 'countries' | 'epgIds' | 'schedule'
+export type R2Kind =
+  | 'meta'
+  | 'picks'
+  | 'channels'
+  | 'streams'
+  | 'categories'
+  | 'countries'
+  | 'epgIds'
+  | 'schedule'
 
 export interface R2Request {
   kind: R2Kind
@@ -55,6 +63,11 @@ export interface R2Mock {
   useGolden(): void
   /** Rewrites `catalogue/meta.json` fields, e.g. `{ version: 3 }` or `{ layout: 2 }`. */
   patchMeta(patch: Record<string, unknown>): void
+  /**
+   * Publishes `catalogue/picks.json` (ADR-0033). Null means the object does not
+   * exist, which is what a bucket where the owner has never saved looks like.
+   */
+  setPicks(document: unknown | null): void
   /** Makes `kind` (or every kind) fail in `fault` mode until `clearFaults()`. */
   fail(kind: R2Kind | 'all', fault?: R2Fault): void
   /** Makes every object whose path (relative to `catalogue/`) matches `pattern` fail in `fault` mode. */
@@ -88,6 +101,7 @@ export function readGolden(): Record<string, GoldenObject> {
 
 function classify(path: string): R2Kind | null {
   if (path === 'meta.json') return 'meta'
+  if (path === 'picks.json') return 'picks'
   const m = /^g\d+\/(.+)\.json\.br$/.exec(path)
   if (!m) return null
   const name = m[1]
@@ -110,6 +124,7 @@ export function createR2Server(): R2Server {
   let options: CatalogueOptions = {}
   let golden: Record<string, GoldenObject> | null = null
   let metaPatch: Record<string, unknown> = {}
+  let picks: unknown | null = null
   const faults = new Map<R2Kind | 'all', R2Fault>()
   const pathFaults: { pattern: RegExp; fault: R2Fault }[] = []
   const compressed = new Map<string, Buffer>()
@@ -122,6 +137,7 @@ export function createR2Server(): R2Server {
     setGeneration: (g) => { generation = g },
     useGolden: () => { golden = readGolden() },
     patchMeta: (patch) => { metaPatch = { ...metaPatch, ...patch } },
+    setPicks: (document) => { picks = document },
     fail: (kind, fault = 'status') => { faults.set(kind, fault) },
     failPath: (pattern, fault = 'status') => { pathFaults.push({ pattern, fault }) },
     clearFaults: () => { faults.clear(); pathFaults.length = 0 },
@@ -152,6 +168,7 @@ export function createR2Server(): R2Server {
           },
           ...metaPatch,
         })
+      case 'picks': return picks === null ? null : JSON.stringify(picks)
       case 'channels': return JSON.stringify(data.channels)
       case 'streams': return JSON.stringify(data.streams)
       case 'categories': return JSON.stringify(data.categories)
@@ -208,8 +225,9 @@ export function createR2Server(): R2Server {
     }
 
     // Generation objects are stored brotli-encoded and served so whatever the client
-    // asked for; `meta.json` is plain JSON with a short lifetime (ADR-0034 section 2).
-    const isMeta = kind === 'meta'
+    // asked for; `meta.json` and `picks.json` are plain JSON with a short lifetime
+    // (ADR-0034 section 2, ADR-0033 section 7).
+    const isMeta = kind === 'meta' || kind === 'picks'
     const cacheKey = fault === 'short' ? null : path + ':' + generation + ':' + body.length
     let payload: Buffer
     if (isMeta) payload = Buffer.from(body)
@@ -243,6 +261,7 @@ export function createR2Server(): R2Server {
       options = next
       golden = null
       metaPatch = {}
+      picks = null
       faults.clear()
       pathFaults.length = 0
       compressed.clear()

@@ -4,6 +4,7 @@ import { installUpstashMock } from './support/upstashMock'
 import type { UpstashMock } from './support/upstashMock'
 import { DEFAULT_GENERATION } from './support/catalogueData'
 import { createR2Server, readGolden } from './support/r2Mock'
+import type { R2Kind } from './support/r2Mock'
 import {
   decodeCatalogue,
   decodeEpg,
@@ -202,6 +203,16 @@ test.describe('r2-golden.json', () => {
 
 // ---- The browser, against the two stores ----
 
+/**
+ * Every Home load also reads `catalogue/picks.json` (ADR-0033): one small,
+ * generation-independent object, 404 until the owner has ever saved. It is
+ * counted here so the read budget stays honest, and excluded from the
+ * generation assertions below, which are about the snapshot objects.
+ */
+const PLAIN_OBJECTS: R2Kind[] = ['meta', 'picks']
+const generationKinds = () =>
+  r2.requests.filter((r) => !PLAIN_OBJECTS.includes(r.kind))
+
 test.describe('R2 first, then Redis', () => {
   test('cold load reads only R2: meta, three bulk objects and the guide index', async ({ page, context }) => {
     const redis = await installUpstashMock(context)
@@ -218,8 +229,10 @@ test.describe('R2 first, then Redis', () => {
     expect(r2.count('epgIds')).toBe(1)
     expect(r2.count('schedule')).toBe(0)
     expect(r2.count('countries')).toBe(0)
-    expect(r2.requests.length).toBe(5)
-    expect(r2.requests.every((r) => r.status === 200)).toBe(true)
+    // One request for picks.json, which has never been published: a 404, not a failure.
+    expect(r2.count('picks')).toBe(1)
+    expect(r2.requests.length).toBe(6)
+    expect(r2.requests.filter((r) => r.kind !== 'picks').every((r) => r.status === 200)).toBe(true)
     expect(redis.requests.length).toBe(0)
   })
 
@@ -227,7 +240,7 @@ test.describe('R2 first, then Redis', () => {
     await installUpstashMock(context)
     await page.goto('/')
     await waitForChannels(page)
-    const bulk = r2.requests.filter((r) => r.kind !== 'meta')
+    const bulk = generationKinds()
     expect(bulk.length).toBeGreaterThan(0)
     // Every generation object went out brotli-encoded; the page rendered channels from them.
     expect(r2.bytes()).toBeGreaterThan(0)
@@ -247,7 +260,7 @@ test.describe('R2 first, then Redis', () => {
     await settle(page, redis)
     report('repeat load, same generation', redis)
 
-    expect(r2.requests.map((r) => r.kind)).toEqual(['meta'])
+    expect(r2.requests.map((r) => r.kind).sort()).toEqual(['meta', 'picks'])
     expect(redis.requests.length).toBe(0)
   })
 
@@ -267,7 +280,7 @@ test.describe('R2 first, then Redis', () => {
     await settle(page, redis)
     report('repeat load, new generation', redis)
 
-    expect(r2.requests.filter((r) => r.kind !== 'meta').every((r) => r.path.startsWith(`g${next}/`))).toBe(true)
+    expect(generationKinds().every((r) => r.path.startsWith(`g${next}/`))).toBe(true)
     expect(r2.count('channels')).toBe(1)
     expect(r2.count('streams')).toBe(1)
     expect(r2.count('categories')).toBe(1)
@@ -359,8 +372,9 @@ test.describe('R2 first, then Redis', () => {
       await page.goto('/')
       await waitForChannels(page)
       await catalogueStoredAs(page, REDIS_GENERATION)
-      // Nothing beyond meta was downloaded from a snapshot this client cannot read.
-      expect(r2.requests.map((r) => r.kind)).toEqual(['meta'])
+      // Nothing beyond meta and the generation-independent picks object was
+      // downloaded from a snapshot this client cannot read.
+      expect(generationKinds()).toEqual([])
       expect(redis.count('channels')).toBe(6)
     })
   }

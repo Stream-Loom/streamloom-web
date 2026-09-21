@@ -1,0 +1,739 @@
+import { test, expect } from '@playwright/test'
+import { onRequest as picksHandler } from '../functions/api/picks/index'
+import { onRequest as channelsHandler } from '../functions/api/picks/channels'
+import { resetAccessJwksCache } from '../functions/api/_lib/accessJwt'
+import { resetIptvCache } from '../functions/api/_lib/iptvOrg'
+import { jwks, makeTestKey, mintToken, validPayload, type TestKey } from './support/accessTokens'
+
+/**
+ * The picks write path, attacked.
+ *
+ * These call the real Pages Function handlers with a generated RSA keypair, a
+ * stubbed `fetch` standing in for the team's certs endpoint and the iptv-org
+ * lists, and an in-memory R2 double that records every mutation. No Cloudflare
+ * runtime, no network and no account are involved, so the whole Access gate can
+ * be exercised — including the cases a live deployment cannot easily produce,
+ * such as `alg: none`, an unknown `kid` and an unreachable JWKS.
+ *
+ * The rule every case checks, one way or another: **nothing is written unless a
+ * token verifies end to end**, and a refusal writes nothing at all.
+ */
+
+const ORIGIN = 'https://streamloom.example'
+const TEAM = 'https://streamloom.cloudflareaccess.com'
+const CERTS = `${TEAM}/cdn-cgi/access/certs`
+const AUD = 'a'.repeat(64)
+
+const ENV_VARS = { CF_ACCESS_TEAM_DOMAIN: TEAM, CF_ACCESS_AUD: AUD }
+
+const CHANNELS_URL = 'https://iptv-org.github.io/api/channels.json'
+const BLOCKLIST_URL = 'https://iptv-org.github.io/api/blocklist.json'
+
+/** A small stand-in for the 31K-row upstream list, with one of each interesting flag. */
+const UPSTREAM_CHANNELS = [
+  { id: 'BBCNews.uk', name: 'BBC News', country: 'GB', categories: ['news'], is_nsfw: false, closed: null, replaced_by: null },
+  { id: 'Arte.fr', name: 'Arte', country: 'FR', categories: ['culture'], is_nsfw: false, closed: null, replaced_by: null },
+  { id: 'OldNews.us', name: 'Old News', country: 'US', categories: ['news'], is_nsfw: false, closed: '2024-01-01', replaced_by: null },
+  { id: 'Moved.de', name: 'Moved Channel', country: 'DE', categories: ['general'], is_nsfw: false, closed: null, replaced_by: 'Arte.fr' },
+  { id: 'Adult.xx', name: 'Adult Channel', country: 'US', categories: ['xxx'], is_nsfw: true, closed: null, replaced_by: null },
+  { id: 'Blocked.us', name: 'Blocked Channel', country: 'US', categories: ['movies'], is_nsfw: false, closed: null, replaced_by: null },
+]
+const UPSTREAM_BLOCKLIST = [{ channel: 'Blocked.us', reason: 'dmca', ref: 'https://example.invalid/1' }]
+
+// ---- R2 double ----
+
+interface StoredObject {
+  body: string
+  etag: string
+}
+
+/**
+ * Minimal R2 double.
+ *
+ * Every mutation is recorded, and `delete` is deliberately present so a test can
+ * prove the route never calls it — the real binding interface in the Function
+ * does not declare one.
+ */
+function makeBucket(initial: Record<string, string> = {}) {
+  const objects = new Map<string, StoredObject>()
+  const mutations: string[] = []
+  let etagSeq = 0
+  const nextEtag = () => `"etag-${(etagSeq += 1)}"`
+
+  for (const [key, body] of Object.entries(initial)) {
+    objects.set(key, { body, etag: nextEtag() })
+  }
+
+  const wrap = (stored: StoredObject) => ({
+    httpEtag: stored.etag,
+    size: stored.body.length,
+    json: async <T,>() => JSON.parse(stored.body) as T,
+    text: async () => stored.body,
+  })
+
+  const bucket = {
+    async get(key: string) {
+      const stored = objects.get(key)
+      return stored ? wrap(stored) : null
+    },
+    async head(key: string) {
+      return objects.has(key) ? { key } : null
+    },
+    async put(key: string, value: string, options?: { onlyIf?: { etagMatches?: string } }) {
+      const existing = objects.get(key)
+      const required = options?.onlyIf?.etagMatches
+      if (required !== undefined && existing?.etag.replace(/^W\//, '') !== required) {
+        mutations.push(`put-refused ${key}`)
+        return null
+      }
+      const etag = nextEtag()
+      objects.set(key, { body: value, etag })
+      mutations.push(`put ${key}`)
+      return { httpEtag: etag }
+    },
+    async delete(key: string) {
+      mutations.push(`delete ${key}`)
+    },
+  }
+
+  return { bucket, objects, mutations }
+}
+
+/** Runs a handler the way Pages does, draining anything it defers. */
+async function call(
+  handler: (ctx: any) => Promise<Response>,
+  request: Request,
+  env: Record<string, unknown>,
+): Promise<Response> {
+  const deferred: Promise<unknown>[] = []
+  const response = await handler({
+    request,
+    params: {},
+    env,
+    waitUntil: (p: Promise<unknown>) => deferred.push(p),
+  })
+  await Promise.allSettled(deferred)
+  return response
+}
+
+// ---- fetch stub ----
+
+interface FetchStub {
+  outbound: string[]
+  /** Set to make the certs endpoint fail. */
+  certsStatus: number
+  certsBody: string
+  iptvStatus: number
+  restore: () => void
+}
+
+function stubFetch(keys: TestKey[]): FetchStub {
+  const original = globalThis.fetch
+  const stub: FetchStub = {
+    outbound: [],
+    certsStatus: 200,
+    certsBody: jwks(...keys),
+    iptvStatus: 200,
+    restore: () => {
+      globalThis.fetch = original
+    },
+  }
+
+  globalThis.fetch = (async (input: RequestInfo | URL) => {
+    const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url
+    stub.outbound.push(url)
+    if (url === CERTS) {
+      return new Response(stub.certsBody, {
+        status: stub.certsStatus,
+        headers: { 'content-type': 'application/json' },
+      })
+    }
+    if (url === CHANNELS_URL) {
+      return new Response(JSON.stringify(UPSTREAM_CHANNELS), {
+        status: stub.iptvStatus,
+        headers: { 'content-type': 'application/json' },
+      })
+    }
+    if (url === BLOCKLIST_URL) {
+      return new Response(JSON.stringify(UPSTREAM_BLOCKLIST), {
+        status: stub.iptvStatus,
+        headers: { 'content-type': 'application/json' },
+      })
+    }
+    // Any other outbound request is a bug worth failing on.
+    return new Response('unexpected', { status: 599 })
+  }) as typeof fetch
+
+  return stub
+}
+
+// ---- request builders ----
+
+const GOOD_BODY = {
+  schema: 1,
+  groups: [{ title: 'News', items: [{ channelId: 'BBCNews.uk', note: 'Always on', rank: 0 }] }],
+}
+
+function writeRequest(
+  token: string | null,
+  body: unknown = GOOD_BODY,
+  extra: Record<string, string> = {},
+  method = 'PUT',
+): Request {
+  const headers: Record<string, string> = {
+    'content-type': 'application/json',
+    'sec-fetch-site': 'same-origin',
+    ...extra,
+  }
+  if (token) headers['Cf-Access-Jwt-Assertion'] = token
+  return new Request(`${ORIGIN}/api/picks`, {
+    method,
+    headers,
+    body: typeof body === 'string' ? body : JSON.stringify(body),
+  })
+}
+
+let key: TestKey
+let otherKey: TestKey
+let stub: FetchStub
+
+test.beforeAll(async () => {
+  key = await makeTestKey('kid-live')
+  otherKey = await makeTestKey('kid-attacker')
+})
+
+test.beforeEach(() => {
+  resetAccessJwksCache()
+  resetIptvCache()
+  stub = stubFetch([key])
+})
+
+test.afterEach(() => {
+  stub.restore()
+})
+
+const goodToken = () => mintToken({ key, payload: validPayload(TEAM, AUD) })
+
+// ---------------------------------------------------------------------------
+
+test.describe('the Access gate', () => {
+  test('a valid token saves, and writes picks.json plus an append-only history object', async () => {
+    const { bucket, objects, mutations } = makeBucket()
+    const res = await call(picksHandler, writeRequest(await goodToken()), { ...ENV_VARS, CATALOGUE_BUCKET: bucket })
+
+    expect(res.status).toBe(200)
+    const body = await res.json()
+    expect(body.ok).toBe(true)
+    expect(body.counts).toEqual({ groups: 1, items: 1 })
+
+    const stored = JSON.parse(objects.get('catalogue/picks.json')!.body)
+    expect(stored.schema).toBe(1)
+    expect(stored.groups[0].items[0].channelId).toBe('BBCNews.uk')
+    // The server owns updatedAt; the client never sends one.
+    expect(typeof stored.updatedAt).toBe('string')
+
+    const historyKeys = [...objects.keys()].filter((k) => k.startsWith('picks-history/'))
+    expect(historyKeys).toHaveLength(1)
+    expect(body.historyKey).toBe(historyKeys[0])
+    expect(mutations.filter((m) => m.startsWith('delete'))).toEqual([])
+  })
+
+  test('no token is refused with 401 and writes nothing', async () => {
+    const { bucket, mutations } = makeBucket()
+    const res = await call(picksHandler, writeRequest(null), { ...ENV_VARS, CATALOGUE_BUCKET: bucket })
+    expect(res.status).toBe(401)
+    expect(mutations).toEqual([])
+  })
+
+  test('an expired token is refused with 401 and writes nothing', async () => {
+    const nowS = Math.floor(Date.now() / 1000)
+    const token = await mintToken({
+      key,
+      payload: validPayload(TEAM, AUD, { exp: nowS - 3600, iat: nowS - 7200, nbf: nowS - 7200 }),
+    })
+    const { bucket, mutations } = makeBucket()
+    const res = await call(picksHandler, writeRequest(token), { ...ENV_VARS, CATALOGUE_BUCKET: bucket })
+    expect(res.status).toBe(401)
+    expect((await res.json()).reason).toBe('expired')
+    expect(mutations).toEqual([])
+  })
+
+  test('a comma-separated audience list accepts either application, and nothing else', async () => {
+    const second = 'c'.repeat(64)
+    const env = { CF_ACCESS_TEAM_DOMAIN: TEAM, CF_ACCESS_AUD: `${AUD}, ${second}` }
+
+    for (const aud of [AUD, second]) {
+      const { bucket, objects } = makeBucket()
+      const token = await mintToken({ key, payload: validPayload(TEAM, aud) })
+      const res = await call(picksHandler, writeRequest(token), { ...env, CATALOGUE_BUCKET: bucket })
+      expect(res.status).toBe(200)
+      expect(objects.has('catalogue/picks.json')).toBe(true)
+    }
+
+    const { bucket, mutations } = makeBucket()
+    const stranger = await mintToken({ key, payload: validPayload(TEAM, 'd'.repeat(64)) })
+    const res = await call(picksHandler, writeRequest(stranger), { ...env, CATALOGUE_BUCKET: bucket })
+    expect(res.status).toBe(403)
+    expect(mutations).toEqual([])
+  })
+
+  test('a token for another audience is refused with 403', async () => {
+    const token = await mintToken({ key, payload: validPayload(TEAM, 'b'.repeat(64)) })
+    const { bucket, mutations } = makeBucket()
+    const res = await call(picksHandler, writeRequest(token), { ...ENV_VARS, CATALOGUE_BUCKET: bucket })
+    expect(res.status).toBe(403)
+    expect((await res.json()).reason).toBe('wrong-audience')
+    expect(mutations).toEqual([])
+  })
+
+  test('a token from another team is refused with 403', async () => {
+    const token = await mintToken({
+      key,
+      payload: validPayload('https://someone-else.cloudflareaccess.com', AUD),
+    })
+    const { bucket, mutations } = makeBucket()
+    const res = await call(picksHandler, writeRequest(token), { ...ENV_VARS, CATALOGUE_BUCKET: bucket })
+    expect(res.status).toBe(403)
+    expect((await res.json()).reason).toBe('wrong-issuer')
+    expect(mutations).toEqual([])
+  })
+
+  test('a tampered payload is refused: the signature no longer covers it', async () => {
+    const token = await goodToken()
+    const [head, , signature] = token.split('.')
+    const forgedPayload = btoa(JSON.stringify(validPayload(TEAM, AUD, { email: 'attacker@example.com' })))
+      .replace(/\+/g, '-')
+      .replace(/\//g, '_')
+      .replace(/=+$/, '')
+    const { bucket, mutations } = makeBucket()
+    const res = await call(picksHandler, writeRequest(`${head}.${forgedPayload}.${signature}`), {
+      ...ENV_VARS,
+      CATALOGUE_BUCKET: bucket,
+    })
+    expect(res.status).toBe(401)
+    expect((await res.json()).reason).toBe('bad-signature')
+    expect(mutations).toEqual([])
+  })
+
+  test('alg: none is refused before any key is fetched', async () => {
+    const token = await mintToken({
+      key,
+      payload: validPayload(TEAM, AUD),
+      header: { alg: 'none', typ: 'JWT', kid: key.kid },
+      rawSignature: '',
+    })
+    const { bucket, mutations } = makeBucket()
+    const res = await call(picksHandler, writeRequest(token), { ...ENV_VARS, CATALOGUE_BUCKET: bucket })
+    expect(res.status).toBe(401)
+    expect((await res.json()).reason).toBe('unsupported-alg')
+    expect(stub.outbound).not.toContain(CERTS)
+    expect(mutations).toEqual([])
+  })
+
+  test('a non-RS256 algorithm is refused (an HS256 token signed with the public modulus)', async () => {
+    const token = await mintToken({
+      key,
+      payload: validPayload(TEAM, AUD),
+      header: { alg: 'HS256', typ: 'JWT', kid: key.kid },
+      rawSignature: 'ZmFrZQ',
+    })
+    const { bucket, mutations } = makeBucket()
+    const res = await call(picksHandler, writeRequest(token), { ...ENV_VARS, CATALOGUE_BUCKET: bucket })
+    expect(res.status).toBe(401)
+    expect((await res.json()).reason).toBe('unsupported-alg')
+    expect(mutations).toEqual([])
+  })
+
+  test('a token signed by a key that is not in the JWKS is refused (unknown kid)', async () => {
+    const token = await mintToken({ key: otherKey, payload: validPayload(TEAM, AUD) })
+    const { bucket, mutations } = makeBucket()
+    const res = await call(picksHandler, writeRequest(token), { ...ENV_VARS, CATALOGUE_BUCKET: bucket })
+    expect(res.status).toBe(401)
+    expect((await res.json()).reason).toBe('unknown-kid')
+    expect(mutations).toEqual([])
+  })
+
+  test('a token whose kid names a real key but signed by another is refused', async () => {
+    // Same kid as the published key, different private key: the signature fails.
+    const impostor = await makeTestKey(key.kid)
+    const token = await mintToken({ key: impostor, payload: validPayload(TEAM, AUD) })
+    const { bucket, mutations } = makeBucket()
+    const res = await call(picksHandler, writeRequest(token), { ...ENV_VARS, CATALOGUE_BUCKET: bucket })
+    expect(res.status).toBe(401)
+    expect((await res.json()).reason).toBe('bad-signature')
+    expect(mutations).toEqual([])
+  })
+
+  test('an unreadable JWKS fails closed with 503, never open', async () => {
+    stub.certsStatus = 500
+    const { bucket, mutations } = makeBucket()
+    const res = await call(picksHandler, writeRequest(await goodToken()), { ...ENV_VARS, CATALOGUE_BUCKET: bucket })
+    expect(res.status).toBe(503)
+    expect((await res.json()).reason).toBe('jwks-unavailable')
+    expect(mutations).toEqual([])
+  })
+
+  test('a service token (no email claim) is refused with 403', async () => {
+    const payload = validPayload(TEAM, AUD)
+    delete payload.email
+    const token = await mintToken({ key, payload: { ...payload, common_name: 'a-service-token' } })
+    const { bucket, mutations } = makeBucket()
+    const res = await call(picksHandler, writeRequest(token), { ...ENV_VARS, CATALOGUE_BUCKET: bucket })
+    expect(res.status).toBe(403)
+    expect((await res.json()).reason).toBe('no-identity')
+    expect(mutations).toEqual([])
+  })
+
+  test('a malformed token is refused without reaching the store', async () => {
+    const { bucket, mutations } = makeBucket()
+    for (const bad of ['', 'not-a-jwt', 'a.b', 'a.b.c.d', '..', '$$$.$$$.$$$']) {
+      const res = await call(picksHandler, writeRequest(bad || null), { ...ENV_VARS, CATALOGUE_BUCKET: bucket })
+      expect(res.status).toBe(401)
+    }
+    expect(mutations).toEqual([])
+  })
+})
+
+test.describe('configuration fails closed', () => {
+  for (const [label, env] of [
+    ['neither variable', {}],
+    ['only the team domain', { CF_ACCESS_TEAM_DOMAIN: TEAM }],
+    ['only the audience', { CF_ACCESS_AUD: AUD }],
+    ['an empty audience', { CF_ACCESS_TEAM_DOMAIN: TEAM, CF_ACCESS_AUD: '   ' }],
+    ['an audience list with an empty entry', {
+      CF_ACCESS_TEAM_DOMAIN: TEAM,
+      CF_ACCESS_AUD: `${AUD},,${'b'.repeat(64)}`,
+    }],
+    ['an audience list with a malformed entry', {
+      CF_ACCESS_TEAM_DOMAIN: TEAM,
+      CF_ACCESS_AUD: `${AUD},not a tag`,
+    }],
+    ['a team domain that is not a Cloudflare Access host', {
+      CF_ACCESS_TEAM_DOMAIN: 'https://attacker.example',
+      CF_ACCESS_AUD: AUD,
+    }],
+    ['a team domain carrying a path', {
+      CF_ACCESS_TEAM_DOMAIN: 'https://streamloom.cloudflareaccess.com/../attacker.example',
+      CF_ACCESS_AUD: AUD,
+    }],
+  ] as [string, Record<string, unknown>][]) {
+    test(`${label}: 503 and nothing written`, async () => {
+      const { bucket, mutations } = makeBucket()
+      const res = await call(picksHandler, writeRequest(await goodToken()), { ...env, CATALOGUE_BUCKET: bucket })
+      expect(res.status).toBe(503)
+      expect((await res.json()).reason).toBe('access-not-configured')
+      expect(mutations).toEqual([])
+      // Nothing was fetched either: the request ends before the JWKS is wanted.
+      expect(stub.outbound).not.toContain(CERTS)
+    })
+  }
+
+  test('no R2 binding: 503 and nothing written, even with a valid token', async () => {
+    const res = await call(picksHandler, writeRequest(await goodToken()), ENV_VARS)
+    expect(res.status).toBe(503)
+    expect((await res.json()).error).toBe('storage-not-configured')
+  })
+})
+
+test.describe('the route surface', () => {
+  test('OPTIONS is refused and no CORS headers are emitted anywhere', async () => {
+    const { bucket } = makeBucket()
+    const res = await call(
+      picksHandler,
+      new Request(`${ORIGIN}/api/picks`, { method: 'OPTIONS' }),
+      { ...ENV_VARS, CATALOGUE_BUCKET: bucket },
+    )
+    // Authorisation runs first, so an unauthenticated OPTIONS never learns the
+    // method list; either way there is no Access-Control-Allow-Origin to be had.
+    expect([401, 405]).toContain(res.status)
+    expect(res.headers.get('access-control-allow-origin')).toBeNull()
+  })
+
+  test('DELETE is not a method this route has', async () => {
+    const { bucket, mutations } = makeBucket({ 'catalogue/picks.json': JSON.stringify(GOOD_BODY) })
+    const res = await call(
+      picksHandler,
+      new Request(`${ORIGIN}/api/picks`, {
+        method: 'DELETE',
+        headers: { 'Cf-Access-Jwt-Assertion': await goodToken() },
+      }),
+      { ...ENV_VARS, CATALOGUE_BUCKET: bucket },
+    )
+    expect(res.status).toBe(405)
+    expect(mutations).toEqual([])
+  })
+
+  test('a cross-site write is refused even with a valid token', async () => {
+    const { bucket, mutations } = makeBucket()
+    const res = await call(
+      picksHandler,
+      writeRequest(await goodToken(), GOOD_BODY, { 'sec-fetch-site': 'cross-site' }),
+      { ...ENV_VARS, CATALOGUE_BUCKET: bucket },
+    )
+    expect(res.status).toBe(403)
+    expect(mutations).toEqual([])
+  })
+
+  test('a form content type is refused (a cross-origin post cannot preflight past it)', async () => {
+    const { bucket, mutations } = makeBucket()
+    const res = await call(
+      picksHandler,
+      writeRequest(await goodToken(), GOOD_BODY, { 'content-type': 'application/x-www-form-urlencoded' }),
+      { ...ENV_VARS, CATALOGUE_BUCKET: bucket },
+    )
+    expect(res.status).toBe(415)
+    expect(mutations).toEqual([])
+  })
+
+  test('the responses are never cached', async () => {
+    const { bucket } = makeBucket()
+    const res = await call(picksHandler, writeRequest(await goodToken()), { ...ENV_VARS, CATALOGUE_BUCKET: bucket })
+    expect(res.headers.get('cache-control')).toBe('no-store')
+  })
+})
+
+test.describe('validation on save', () => {
+  const badBodies: [string, unknown][] = [
+    ['a non-object body', []],
+    ['an unknown schema', { schema: 2, groups: [] }],
+    ['an unknown top-level field', { schema: 1, groups: [], updatedAt: '2000-01-01T00:00:00.000Z' }],
+    ['an unknown item field', { schema: 1, groups: [{ title: 'A', items: [{ channelId: 'Arte.fr', evil: 1 }] }] }],
+    ['a non-string title', { schema: 1, groups: [{ title: 42, items: [] }] }],
+    ['a note that is not a string', { schema: 1, groups: [{ title: 'A', items: [{ channelId: 'Arte.fr', note: { x: 1 } }] }] }],
+    ['a rank that is not an integer', { schema: 1, groups: [{ title: 'A', items: [{ channelId: 'Arte.fr', rank: 1.5 }] }] }],
+    ['a channel id with a path separator', { schema: 1, groups: [{ title: 'A', items: [{ channelId: '../../evil' }] }] }],
+    ['too many groups', { schema: 1, groups: Array.from({ length: 13 }, (_, i) => ({ title: `G${i}`, items: [] })) }],
+    ['duplicate group titles', { schema: 1, groups: [{ title: 'News', items: [] }, { title: 'news', items: [] }] }],
+    ['the same channel twice in one group', {
+      schema: 1,
+      groups: [{ title: 'A', items: [{ channelId: 'Arte.fr' }, { channelId: 'Arte.fr' }] }],
+    }],
+  ]
+
+  for (const [label, body] of badBodies) {
+    test(`${label} is refused with 400 and writes nothing`, async () => {
+      const { bucket, mutations } = makeBucket()
+      const res = await call(picksHandler, writeRequest(await goodToken(), body), {
+        ...ENV_VARS,
+        CATALOGUE_BUCKET: bucket,
+      })
+      expect(res.status).toBe(400)
+      expect(mutations).toEqual([])
+    })
+  }
+
+  test('an oversized body is refused with 413 before it is parsed', async () => {
+    const huge = JSON.stringify({ schema: 1, groups: [{ title: 'A'.repeat(70_000), items: [] }] })
+    const { bucket, mutations } = makeBucket()
+    const res = await call(picksHandler, writeRequest(await goodToken(), huge), {
+      ...ENV_VARS,
+      CATALOGUE_BUCKET: bucket,
+    })
+    expect(res.status).toBe(413)
+    expect(mutations).toEqual([])
+  })
+
+  test('an id that is not in the iptv-org list is refused', async () => {
+    const { bucket, mutations } = makeBucket()
+    const res = await call(
+      picksHandler,
+      writeRequest(await goodToken(), { schema: 1, groups: [{ title: 'A', items: [{ channelId: 'Invented.zz' }] }] }),
+      { ...ENV_VARS, CATALOGUE_BUCKET: bucket },
+    )
+    expect(res.status).toBe(400)
+    expect((await res.json()).errors.join(' ')).toContain('not in the iptv-org channel list')
+    expect(mutations).toEqual([])
+  })
+
+  test('a blocklisted id is refused', async () => {
+    const { bucket, mutations } = makeBucket()
+    const res = await call(
+      picksHandler,
+      writeRequest(await goodToken(), { schema: 1, groups: [{ title: 'A', items: [{ channelId: 'Blocked.us' }] }] }),
+      { ...ENV_VARS, CATALOGUE_BUCKET: bucket },
+    )
+    expect(res.status).toBe(400)
+    expect((await res.json()).errors.join(' ')).toContain('blocklist')
+    expect(mutations).toEqual([])
+  })
+
+  test('an is_nsfw id is refused', async () => {
+    const { bucket, mutations } = makeBucket()
+    const res = await call(
+      picksHandler,
+      writeRequest(await goodToken(), { schema: 1, groups: [{ title: 'A', items: [{ channelId: 'Adult.xx' }] }] }),
+      { ...ENV_VARS, CATALOGUE_BUCKET: bucket },
+    )
+    expect(res.status).toBe(400)
+    expect((await res.json()).errors.join(' ')).toContain('is_nsfw')
+    expect(mutations).toEqual([])
+  })
+
+  test('closed and replaced ids are saved, with a warning', async () => {
+    const { bucket, objects } = makeBucket()
+    const res = await call(
+      picksHandler,
+      writeRequest(await goodToken(), {
+        schema: 1,
+        groups: [{ title: 'A', items: [{ channelId: 'OldNews.us' }, { channelId: 'Moved.de' }] }],
+      }),
+      { ...ENV_VARS, CATALOGUE_BUCKET: bucket },
+    )
+    expect(res.status).toBe(200)
+    const warnings = (await res.json()).warnings as string[]
+    expect(warnings.join(' ')).toContain('closed')
+    expect(warnings.join(' ')).toContain('replaced by')
+    expect(objects.has('catalogue/picks.json')).toBe(true)
+  })
+
+  test('an unreachable iptv-org list fails the save closed, writing nothing', async () => {
+    stub.iptvStatus = 500
+    const { bucket, mutations } = makeBucket()
+    const res = await call(picksHandler, writeRequest(await goodToken()), {
+      ...ENV_VARS,
+      CATALOGUE_BUCKET: bucket,
+    })
+    expect(res.status).toBe(503)
+    expect((await res.json()).error).toBe('validation-unavailable')
+    expect(mutations).toEqual([])
+  })
+})
+
+test.describe('concurrent edits', () => {
+  test('a save without If-Match over an existing document returns 412 with the newer copy', async () => {
+    const existing = JSON.stringify({ schema: 1, updatedAt: '2026-01-01T00:00:00.000Z', groups: [] })
+    const { bucket, mutations } = makeBucket({ 'catalogue/picks.json': existing })
+    const res = await call(picksHandler, writeRequest(await goodToken()), {
+      ...ENV_VARS,
+      CATALOGUE_BUCKET: bucket,
+    })
+    expect(res.status).toBe(412)
+    const body = await res.json()
+    expect(body.picks.updatedAt).toBe('2026-01-01T00:00:00.000Z')
+    expect(body.etag).toBeTruthy()
+    expect(mutations).toEqual([])
+  })
+
+  test('a stale If-Match returns 412 with the newer copy and writes nothing', async () => {
+    const existing = JSON.stringify({ schema: 1, updatedAt: '2026-01-01T00:00:00.000Z', groups: [] })
+    const { bucket, mutations } = makeBucket({ 'catalogue/picks.json': existing })
+    const res = await call(
+      picksHandler,
+      writeRequest(await goodToken(), GOOD_BODY, { 'if-match': '"an-older-etag"' }),
+      { ...ENV_VARS, CATALOGUE_BUCKET: bucket },
+    )
+    expect(res.status).toBe(412)
+    expect((await res.json()).picks.updatedAt).toBe('2026-01-01T00:00:00.000Z')
+    expect(mutations).toEqual([])
+  })
+
+  test('a current If-Match saves, and the new ETag is returned for the next save', async () => {
+    const { bucket, objects } = makeBucket()
+    const first = await call(picksHandler, writeRequest(await goodToken()), {
+      ...ENV_VARS,
+      CATALOGUE_BUCKET: bucket,
+    })
+    const firstEtag = (await first.json()).etag as string
+    expect(firstEtag).toBe(objects.get('catalogue/picks.json')!.etag)
+
+    const second = await call(
+      picksHandler,
+      writeRequest(await goodToken(), GOOD_BODY, { 'if-match': firstEtag }),
+      { ...ENV_VARS, CATALOGUE_BUCKET: bucket },
+    )
+    expect(second.status).toBe(200)
+    // Two saves, two history objects: nothing was replaced.
+    expect([...objects.keys()].filter((k) => k.startsWith('picks-history/'))).toHaveLength(2)
+  })
+
+  test('an If-Match naming a copy that does not exist is refused', async () => {
+    const { bucket, mutations } = makeBucket()
+    const res = await call(
+      picksHandler,
+      writeRequest(await goodToken(), GOOD_BODY, { 'if-match': '"ghost"' }),
+      { ...ENV_VARS, CATALOGUE_BUCKET: bucket },
+    )
+    expect(res.status).toBe(412)
+    expect(mutations).toEqual([])
+  })
+
+  test('history is never overwritten: a colliding key gets a new one', async () => {
+    const { bucket, objects } = makeBucket()
+    // Pre-place every candidate for the current millisecond so the first key is taken.
+    const res = await call(picksHandler, writeRequest(await goodToken()), {
+      ...ENV_VARS,
+      CATALOGUE_BUCKET: bucket,
+    })
+    const firstKey = (await res.json()).historyKey as string
+    const firstBody = objects.get(firstKey)!.body
+
+    // A second save that lands on the same key must not replace the first.
+    const etag = objects.get('catalogue/picks.json')!.etag
+    await call(picksHandler, writeRequest(await goodToken(), GOOD_BODY, { 'if-match': etag }), {
+      ...ENV_VARS,
+      CATALOGUE_BUCKET: bucket,
+    })
+    expect(objects.get(firstKey)!.body).toBe(firstBody)
+  })
+})
+
+test.describe('reading', () => {
+  test('GET returns the stored document and its ETag', async () => {
+    const existing = JSON.stringify({ schema: 1, updatedAt: '2026-02-02T00:00:00.000Z', groups: [] })
+    const { bucket } = makeBucket({ 'catalogue/picks.json': existing })
+    const res = await call(
+      picksHandler,
+      new Request(`${ORIGIN}/api/picks`, { headers: { 'Cf-Access-Jwt-Assertion': await goodToken() } }),
+      { ...ENV_VARS, CATALOGUE_BUCKET: bucket },
+    )
+    expect(res.status).toBe(200)
+    const body = await res.json()
+    expect(body.picks.updatedAt).toBe('2026-02-02T00:00:00.000Z')
+    expect(body.etag).toBeTruthy()
+  })
+
+  test('GET is refused without a token', async () => {
+    const { bucket } = makeBucket()
+    const res = await call(picksHandler, new Request(`${ORIGIN}/api/picks`), {
+      ...ENV_VARS,
+      CATALOGUE_BUCKET: bucket,
+    })
+    expect(res.status).toBe(401)
+  })
+})
+
+test.describe('the picker search', () => {
+  test('is refused without a token, and never fetches the upstream list', async () => {
+    const res = await call(channelsHandler, new Request(`${ORIGIN}/api/picks/channels?q=bbc`), ENV_VARS)
+    expect(res.status).toBe(401)
+    expect(stub.outbound).not.toContain(CHANNELS_URL)
+  })
+
+  test('searches by name and reports every flag the portal has to show', async () => {
+    const res = await call(
+      channelsHandler,
+      new Request(`${ORIGIN}/api/picks/channels?q=channel`, {
+        headers: { 'Cf-Access-Jwt-Assertion': await goodToken() },
+      }),
+      ENV_VARS,
+    )
+    expect(res.status).toBe(200)
+    const body = await res.json()
+    const byId = new Map(body.results.map((c: { id: string }) => [c.id, c]))
+    expect(byId.get('Adult.xx').nsfw).toBe(true)
+    expect(byId.get('Blocked.us').blocked).toBe('dmca')
+    expect(byId.get('Moved.de').replacedBy).toBe('Arte.fr')
+  })
+
+  test('narrows by country and category', async () => {
+    const res = await call(
+      channelsHandler,
+      new Request(`${ORIGIN}/api/picks/channels?country=GB&category=news`, {
+        headers: { 'Cf-Access-Jwt-Assertion': await goodToken() },
+      }),
+      ENV_VARS,
+    )
+    const body = await res.json()
+    expect(body.results.map((c: { id: string }) => c.id)).toEqual(['BBCNews.uk'])
+  })
+})

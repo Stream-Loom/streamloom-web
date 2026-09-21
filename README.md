@@ -182,3 +182,57 @@ deployed JavaScript. Use the **read-only** token, never a read-write one.
 No variables need to be set for `netlify.toml`; that file only defines build and
 redirect rules.
 
+### `wrangler.jsonc` is for local development, not for the deployment
+
+A Pages project treats a Wrangler file as its configuration **only when the file
+carries `pages_build_output_dir`**. This project's `wrangler.jsonc` deliberately
+does not, so it applies to `wrangler pages dev` alone and the deployed project
+keeps reading its bindings and variables from the dashboard. Adding that key
+would make the file authoritative and discard everything currently set in the
+dashboard, so a binding added to `wrangler.jsonc` must also be added there.
+
+---
+
+## The author's-picks portal (`/admin`, ADR-0033)
+
+An unlisted page for curating pinned channels from the whole iptv-org list.
+Nothing links to it; it is served `noindex` and `no-store`. It is protected by a
+**Cloudflare Access** application, and the Function behind it verifies the
+`Cf-Access-Jwt-Assertion` JWT itself, so a misconfigured route cannot expose the
+write path.
+
+The project's **only** write capability is an R2 binding to the catalogue bucket.
+There is no R2 API token, no Supabase key and no Upstash write token in this
+repository, and nothing about the portal is a `VITE_` variable — so nothing about
+it reaches the browser bundle.
+
+### What the owner has to configure (once, a few minutes)
+
+1. **Zero Trust -> Access -> Applications -> Add -> Self-hosted.**
+   The application must cover **both** paths, because Access only attaches the
+   `Cf-Access-Jwt-Assertion` header to requests for a path it protects — the page
+   at `/admin` and the endpoint at `/api/picks` (a path prefix, so it also covers
+   `/api/picks/channels`). Preferably add both as **paths on one application**,
+   which yields one AUD tag. Policy: Allow, `Emails` = the owner's address, with
+   MFA required. Copy the **Application Audience (AUD) tag**.
+2. **Workers & Pages -> `streamloomweb` -> Settings -> Variables and Secrets**,
+   under **both Production and Preview**:
+   | Variable | Value |
+   |---|---|
+   | `CF_ACCESS_TEAM_DOMAIN` | `https://<team>.cloudflareaccess.com` |
+   | `CF_ACCESS_AUD` | the AUD tag copied above |
+   If you created two applications instead of one, set `CF_ACCESS_AUD` to both
+   tags **comma-separated** (`tag1,tag2`); the endpoint accepts a token carrying
+   either and nothing else. Until both variables are set, `/api/picks` answers
+   **503 and writes nothing**.
+3. **Settings -> Bindings -> Add -> R2 bucket**: variable name
+   `CATALOGUE_BUCKET`, bucket `streamloom-catalogue`. **Not** `channel-icons` —
+   that bucket sits behind a public read route. Redeploy for it to take effect.
+4. Confirm the catalogue bucket's public hostname serves `catalogue/picks.json`
+   (it is written beside `catalogue/meta.json`, outside `catalogue/g<N>/`, so the
+   14-day lifecycle rule on the `catalogue/g` prefix does not match it).
+
+Then open `/admin`, sign in through Access, and save. A pin already in the live
+generation appears on the site within about a minute; one that is not yet
+published appears at the next sync, and the portal says which is which.
+
