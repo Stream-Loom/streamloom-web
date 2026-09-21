@@ -1,12 +1,13 @@
 import { useEffect, useState, useCallback, useMemo } from 'react'
 import type { Category, EnrichedChannel, EpgProgram } from '../api/types'
 import {
-  fetchCatalogueFromRedis,
+  fetchCatalogue,
   fetchCatalogueMeta,
-  fetchEpgIdsFromRedis,
-  isUpstashConfigured,
-} from '../api/redis'
-import type { CatalogueGeneration } from '../api/redis'
+  fetchEpgIds,
+  isCatalogueSourceConfigured,
+  pinGeneration,
+} from '../api/catalogueSource'
+import type { CatalogueGeneration, CatalogueSource } from '../api/catalogueSource'
 import { loadSchedule } from '../util/scheduleLoader'
 import { enrichChannels } from '../util/enrich'
 import { buildSearchIndex, setSearchIndex as installSearchIndex, type SearchIndex } from '../util/searchText'
@@ -45,12 +46,14 @@ interface UseChannelsResult {
   /** Re-reads only the schedule index (two small requests, not the whole catalogue). */
   refreshEpg: () => Promise<void>
   /** Where catalogue data was last loaded from */
-  source: 'redis' | 'cache' | null
+  source: CatalogueSource | 'cache' | null
 }
 
 interface CatalogueLoad {
   /** Generation the catalogue was read from. */
   generation: number
+  /** Store it came from: R2, or Redis when R2 could not serve it. */
+  source: CatalogueSource
   channels: EnrichedChannel[]
   categories: Category[]
   /** Null when the schedule index could not be read. */
@@ -68,7 +71,7 @@ let _epgAvailable = false
 let _generation: number | null = null
 let _loading = true
 let _error: string | null = null
-let _source: 'redis' | 'cache' | null = null
+let _source: CatalogueSource | 'cache' | null = null
 const _listeners = new Set<() => void>()
 
 function notify() {
@@ -79,10 +82,11 @@ onStreamStateChange(() => {
   notify()
 })
 
-const WORKER_TIMEOUT_MS = 25_000
+/** Covers an R2 attempt (8 s) followed by the whole Redis path (20 s). */
+const WORKER_TIMEOUT_MS = 35_000
 
 /**
- * Runs the load inside a Web Worker so Redis page parsing and the ~40k-row join
+ * Runs the load inside a Web Worker so catalogue parsing and the ~40k-row join
  * stay off the main thread. Resolves undefined when no worker can be used, which
  * tells the caller to fall back to the main thread.
  */
@@ -117,8 +121,12 @@ function loadInWorker(meta: CatalogueGeneration): Promise<CatalogueLoad | null |
     worker.onmessage = (event: MessageEvent<CatalogueWorkerResponse>) => {
       const data = event.data
       if (data && data.ok) {
+        // The worker may have fallen back to Redis, so the generation and store it
+        // reports are the ones the catalogue really is; schedules must follow them.
+        pinGeneration({ generation: data.generation, source: data.source })
         finish({
-          generation: meta.generation,
+          generation: data.generation,
+          source: data.source,
           channels: data.channels,
           categories: data.categories,
           epgIds: data.epgIds,
@@ -137,11 +145,12 @@ function loadInWorker(meta: CatalogueGeneration): Promise<CatalogueLoad | null |
 
 /** Fallback for environments without workers: identical work, main thread. */
 async function loadOnMainThread(meta: CatalogueGeneration): Promise<CatalogueLoad | null> {
-  const catalogue = await fetchCatalogueFromRedis(meta)
+  const catalogue = await fetchCatalogue(meta)
   if (!catalogue) return null
-  const epgIds = await fetchEpgIdsFromRedis()
+  const epgIds = await fetchEpgIds()
   return {
     generation: catalogue.generation,
+    source: catalogue.source,
     channels: enrichChannels(catalogue.channels, catalogue.streams, getWorkingMapSnapshot()),
     categories: catalogue.categories,
     epgIds,
@@ -155,7 +164,7 @@ async function loadCatalogue(meta: CatalogueGeneration): Promise<CatalogueLoad |
 }
 
 /** Applies a freshly loaded catalogue to the shared module state. */
-function applyLoad(load: CatalogueLoad, source: 'redis' | 'cache') {
+function applyLoad(load: CatalogueLoad, source: CatalogueSource | 'cache') {
   _channels = load.channels
   _categories = load.categories
   _generation = load.generation
@@ -252,12 +261,12 @@ async function loadData(force = false) {
 
   try {
     // One GET names the current generation. When it is the one already held, the
-    // catalogue is identical to what Redis would return and nothing is downloaded.
+    // catalogue is identical to what a download would return and nothing is fetched.
     const meta = await fetchCatalogueMeta()
 
     if (!meta) {
       reportLoadFailure(
-        isUpstashConfigured ? 'catalogue has not been published' : 'data source is not configured',
+        isCatalogueSourceConfigured ? 'catalogue has not been published' : 'data source is not configured',
       )
       return
     }
@@ -271,12 +280,12 @@ async function loadData(force = false) {
 
     if (!load) {
       reportLoadFailure(
-        isUpstashConfigured ? 'catalogue has not been published' : 'data source is not configured',
+        isCatalogueSourceConfigured ? 'catalogue has not been published' : 'data source is not configured',
       )
       return
     }
 
-    applyLoad(load, 'redis')
+    applyLoad(load, load.source)
     notify()
 
     writeStoredCatalogue({
@@ -298,7 +307,7 @@ async function loadData(force = false) {
  */
 async function confirmUnchangedCatalogue() {
   if ((_epgIds?.size ?? 0) === 0) {
-    const ids = await fetchEpgIdsFromRedis()
+    const ids = await fetchEpgIds()
     if (ids && ids.length > 0) {
       _epgIds = new Set(ids)
       _epgAvailable = true
@@ -322,7 +331,7 @@ let _epgRefresh: Promise<void> | null = null
 function refreshEpgIds(): Promise<void> {
   if (_epgRefresh) return _epgRefresh
   _epgRefresh = (async () => {
-    const ids = await fetchEpgIdsFromRedis(true)
+    const ids = await fetchEpgIds(true)
     if (ids && ids.length > 0) {
       _epgIds = new Set(ids)
       _epgAvailable = true
@@ -341,7 +350,7 @@ loadData()
  * How often the catalogue, schedules and dead-stream list are re-read.
  *
  * Four hours keeps a long-lived tab (a TV browser session can stay open all day)
- * within one refresh of the sync worker, without polling Redis in the meantime.
+ * within one refresh of the sync worker, without polling the store in the meantime.
  */
 const REFRESH_INTERVAL_MS = 4 * 60 * 60 * 1000
 
@@ -480,9 +489,9 @@ export async function clearCatalogueCache() {
 
 // ---- Debug helpers ----
 export function getDataSource() { return _source }
-export function getUpstashConfigured() { return isUpstashConfigured }
+export function getUpstashConfigured() { return isCatalogueSourceConfigured }
 
-// ---- EPG (read from Redis on demand, one key per channel) ----
+// ---- EPG (read on demand, one object per channel) ----
 const _epgCache = new Map<string, EpgProgram[]>()
 
 export function useEpg(channelId: string | null) {

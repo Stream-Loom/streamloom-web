@@ -1,5 +1,5 @@
 /**
- * Schedule reads, in order of cost: memory (callers' own caches), IndexedDB, Redis.
+ * Schedule reads, in order of cost: memory (callers' own caches), IndexedDB, the network (R2, then Redis).
  *
  * Every Redis read is metered, so a schedule is fetched at most once per catalogue
  * generation and then served from IndexedDB, including after a reload. Stored
@@ -7,7 +7,7 @@
  * is what makes them safe to reuse: a generation is immutable.
  */
 
-import { fetchEpgFromRedis, resolveGeneration } from '../api/redis'
+import { fetchEpg, resolveGeneration } from '../api/catalogueSource'
 import type { EpgProgram } from '../api/types'
 import { readStoredSchedules, writeStoredSchedules } from './catalogueStore'
 
@@ -22,7 +22,7 @@ export function readPersistedSchedules(
   return readStoredSchedules(generation, channelIds).catch(() => new Map<string, EpgProgram[]>())
 }
 
-/** Persists schedules just read from Redis. Best-effort and never throws. */
+/** Persists schedules just read from the network. Best-effort and never throws. */
 export function persistSchedules(
   generation: number,
   entries: Iterable<[string, EpgProgram[]]>,
@@ -31,7 +31,7 @@ export function persistSchedules(
 }
 
 /**
- * One channel's schedule: stored copy first, Redis on a miss (then stored).
+ * One channel's schedule: stored copy first, the network on a miss (then stored).
  * Resolves to an empty list when the schedule cannot be read.
  */
 export async function loadSchedule(channelId: string): Promise<EpgProgram[]> {
@@ -42,7 +42,7 @@ export async function loadSchedule(channelId: string): Promise<EpgProgram[]> {
   const hit = stored.get(channelId)
   if (hit) return hit
 
-  const programs = await fetchEpgFromRedis(channelId, generation)
+  const programs = await fetchEpg(channelId, generation)
   if (programs.length > 0) void persistSchedules(generation, [[channelId, programs]])
   return programs
 }

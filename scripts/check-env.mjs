@@ -1,11 +1,12 @@
 /**
  * Prebuild guard: refuses to build a bundle that cannot read its catalogue.
  *
- * The two Upstash variables are the app's only data source. Vite inlines
- * `VITE_*` variables at build time, so a missing variable does not fail the
- * build — it silently produces a deployed app that renders no channels and
- * shows "Upstash Redis is not configured". That is the failure that ships when
- * a new branch or preview deployment lacks its environment.
+ * The catalogue R2 base URL is the primary data source and the two Upstash
+ * variables are its fallback (ADR-0030). Vite inlines `VITE_*` variables at
+ * build time, so a missing variable does not fail the build — it silently
+ * produces a deployed app that reads nothing from that store (or, with both
+ * missing, renders no channels). That is the failure that ships when a new
+ * branch or preview deployment lacks its environment.
  *
  * This check fails the build loudly instead, naming the missing keys and where
  * to set them. It mirrors the fallback ordering in src/api/redis.ts so the
@@ -18,6 +19,10 @@
 import { readFileSync } from 'node:fs'
 
 const REQUIRED = [
+  {
+    keys: ['VITE_CATALOGUE_R2_BASE_URL'],
+    label: 'Catalogue R2 base URL (the public hostname serving catalogue/meta.json)',
+  },
   {
     keys: [
       'VITE_UPSTASH_REDIS_REST_URL',
@@ -82,9 +87,10 @@ console.error(
     '',
     names,
     '',
-    'These are the browser-only data source (Upstash Redis, ADR-0015). Vite',
-    'inlines them at build time, so building without them ships a bundle that',
-    'renders no channels — the "Upstash Redis is not configured" dead app.',
+    'These are the browser-only data sources: R2 snapshots first (ADR-0030),',
+    'Upstash Redis as the fallback (ADR-0015). Vite inlines them at build',
+    'time, so building without them ships a bundle that reads nothing from',
+    'that store, or renders no channels at all.',
     '',
     'Where to set them (Cloudflare Pages):',
     '  Dashboard -> your Pages project -> Settings -> Variables and Secrets',
