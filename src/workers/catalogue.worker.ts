@@ -18,6 +18,8 @@ export interface CatalogueWorkerRequest {
   working: Record<string, WorkingRecord>
   /** The generation the caller already read and chose to download; saves a second `meta` read. */
   meta: CatalogueGeneration
+  /** Generation the caller already holds, so a fallback that finds the same one downloads nothing. */
+  held: number | null
 }
 
 export interface CatalogueWorkerResponse {
@@ -25,6 +27,8 @@ export interface CatalogueWorkerResponse {
   /** Generation the catalogue really is: Redis's when R2 could not serve the requested one. */
   generation: number
   source: CatalogueSource
+  /** True when the store's generation is the held one and nothing was downloaded. */
+  unchanged?: boolean
   channels: EnrichedChannel[]
   categories: Category[]
   /** Null when the schedule index could not be read. */
@@ -43,7 +47,20 @@ ctx.onmessage = async (event: MessageEvent<CatalogueWorkerRequest>) => {
   const working = event.data.working ?? {}
 
   try {
-    const catalogue = await fetchCatalogue(event.data.meta)
+    const catalogue = await fetchCatalogue(event.data.meta, event.data.held ?? null)
+
+    if (catalogue && 'unchanged' in catalogue) {
+      ctx.postMessage({
+        ok: true,
+        unchanged: true,
+        generation: catalogue.generation,
+        source: catalogue.source,
+        channels: [],
+        categories: [],
+        epgIds: null,
+      })
+      return
+    }
 
     if (!catalogue) {
       ctx.postMessage({

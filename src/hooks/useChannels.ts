@@ -50,6 +50,8 @@ interface UseChannelsResult {
 }
 
 interface CatalogueLoad {
+  /** True when the fallback store's generation is the one already held: nothing was downloaded. */
+  unchanged?: boolean
   /** Generation the catalogue was read from. */
   generation: number
   /** Store it came from: R2, or Redis when R2 could not serve it. */
@@ -125,6 +127,7 @@ function loadInWorker(meta: CatalogueGeneration): Promise<CatalogueLoad | null |
         // reports are the ones the catalogue really is; schedules must follow them.
         pinGeneration({ generation: data.generation, source: data.source })
         finish({
+          unchanged: data.unchanged,
           generation: data.generation,
           source: data.source,
           channels: data.channels,
@@ -138,15 +141,25 @@ function loadInWorker(meta: CatalogueGeneration): Promise<CatalogueLoad | null |
     }
     worker.onerror = () => finish(undefined)
 
-    const request: CatalogueWorkerRequest = { working: getWorkingMapSnapshot(), meta }
+    const request: CatalogueWorkerRequest = { working: getWorkingMapSnapshot(), meta, held: _generation }
     worker.postMessage(request)
   })
 }
 
 /** Fallback for environments without workers: identical work, main thread. */
 async function loadOnMainThread(meta: CatalogueGeneration): Promise<CatalogueLoad | null> {
-  const catalogue = await fetchCatalogue(meta)
+  const catalogue = await fetchCatalogue(meta, _generation)
   if (!catalogue) return null
+  if ('unchanged' in catalogue) {
+    return {
+      unchanged: true,
+      generation: catalogue.generation,
+      source: catalogue.source,
+      channels: [],
+      categories: [],
+      epgIds: null,
+    }
+  }
   const epgIds = await fetchEpgIds()
   return {
     generation: catalogue.generation,
@@ -282,6 +295,12 @@ async function loadData(force = false) {
       reportLoadFailure(
         isCatalogueSourceConfigured ? 'catalogue has not been published' : 'data source is not configured',
       )
+      return
+    }
+
+    if (load.unchanged) {
+      // R2 named a generation it could not serve; Redis's is the one already held.
+      await confirmUnchangedCatalogue()
       return
     }
 

@@ -34,6 +34,16 @@ export interface Catalogue {
   categories: Category[]
 }
 
+/**
+ * R2 named a generation it could not serve, but Redis's own generation is the one
+ * the caller already holds, so there is nothing to download.
+ */
+export interface UnchangedCatalogue {
+  unchanged: true
+  generation: number
+  source: CatalogueSource
+}
+
 /** True when at least one store is configured. */
 export const isCatalogueSourceConfigured = r2.isR2Configured || redis.isUpstashConfigured
 
@@ -97,8 +107,17 @@ async function fromRedis(meta: redis.CatalogueGeneration): Promise<Catalogue | n
  * From R2 when `meta` came from R2; if any of its objects fails, Redis is asked for
  * its own meta and the whole catalogue is read from that generation instead. The
  * result carries the generation it really is.
+ *
+ * `held` is the generation the caller already has. When R2 cannot serve the
+ * generation it named and Redis's own generation is `held`, nothing is downloaded
+ * (`UnchangedCatalogue`): otherwise an R2 generation that is unreadable (say its
+ * objects were retired under a live meta) would re-download the whole catalogue
+ * from Redis on every start.
  */
-export async function fetchCatalogue(meta: CatalogueGeneration): Promise<Catalogue | null> {
+export async function fetchCatalogue(
+  meta: CatalogueGeneration,
+  held: number | null = null,
+): Promise<Catalogue | UnchangedCatalogue | null> {
   if (meta.source === 'r2') {
     const loaded = await r2.fetchCatalogueFromR2(meta.r2)
     if (loaded) {
@@ -106,7 +125,12 @@ export async function fetchCatalogue(meta: CatalogueGeneration): Promise<Catalog
       return { generation: meta.generation, source: 'r2', ...loaded }
     }
     const fallback = await redis.fetchCatalogueMeta()
-    return fallback ? fromRedis(fallback) : null
+    if (!fallback) return null
+    if (held !== null && fallback.generation === held) {
+      pinGeneration({ generation: held, source: 'redis' })
+      return { unchanged: true, generation: held, source: 'redis' }
+    }
+    return fromRedis(fallback)
   }
   return fromRedis(meta.redis)
 }

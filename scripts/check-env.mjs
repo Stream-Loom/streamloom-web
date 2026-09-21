@@ -77,6 +77,18 @@ if (process.env.SKIP_ENV_CHECK === '1') {
 loadEnvFile()
 
 const missing = REQUIRED.filter((required) => !resolved(required))
+
+// A scheme-less base URL would pass the presence check yet leave R2 silently disabled.
+const r2Base = process.env.VITE_CATALOGUE_R2_BASE_URL
+if (r2Base && !/^https?:\/\//i.test(r2Base.trim())) {
+  console.error(
+    '\nStreamLoom build aborted: VITE_CATALOGUE_R2_BASE_URL must start with http:// or https:// (got "' +
+      r2Base +
+      '").\n',
+  )
+  process.exit(1)
+}
+
 if (missing.length === 0) process.exit(0)
 
 const names = missing.map((m) => `  - ${m.label} (set any of: ${m.keys.join(', ')})`).join('\n')

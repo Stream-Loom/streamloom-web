@@ -337,6 +337,7 @@ test.describe('R2 first, then Redis', () => {
   for (const [label, fault] of [
     ['malformed brotli', 'garbage'],
     ['an object that disagrees with meta.counts', 'short'],
+    ['a missing object (404)', 'notfound'],
   ] as const) {
     test(`${label}: falls through to Redis`, async ({ page, context }) => {
       const redis = await installUpstashMock(context, { generation: REDIS_GENERATION })
@@ -363,6 +364,47 @@ test.describe('R2 first, then Redis', () => {
       expect(redis.count('channels')).toBe(6)
     })
   }
+
+  test('a fallback that finds the held generation downloads nothing on the next start', async ({ page, context }) => {
+    // R2 names a generation whose objects cannot be read (say retired under a live meta),
+    // while Redis is on an older one. The first load takes Redis's catalogue; every later
+    // start must see that it already holds Redis's generation instead of re-reading it.
+    const redis = await installUpstashMock(context, { generation: REDIS_GENERATION })
+    r2.fail('streams', 'notfound')
+    await page.goto('/')
+    await waitForChannels(page)
+    await catalogueStoredAs(page, REDIS_GENERATION)
+    await settle(page, redis)
+    expect(redis.count('channels')).toBe(6)
+
+    redis.reset()
+    r2.resetRequests()
+    await page.reload()
+    await waitForChannels(page)
+    await settle(page, redis)
+    report('repeat load, R2 generation unreadable', redis)
+
+    expect(redis.catalogueDataCount()).toBe(0)
+    expect(redis.count('meta')).toBe(1)
+    expect(await storedGeneration(page)).toBe(REDIS_GENERATION)
+  })
+
+  test('one schedule object failing does not push the other rows to Redis', async ({ page, context }) => {
+    const redis = await installUpstashMock(context)
+    r2.failPath(/\/epg\/ch3\.xx\.json\.br$/, 'status')
+    await page.goto('/guide')
+    await expect(page.locator('.epg-guide__row').first()).toBeVisible({ timeout: 60_000 })
+    await expect
+      .poll(() => page.locator('.epg-guide__program').count(), { timeout: 60_000 })
+      .toBeGreaterThan(0)
+    await settle(page, redis)
+    report('guide open, one bad schedule', redis)
+
+    expect(r2.requests.some((r) => r.path.endsWith('/ch3.xx.json.br') && r.status === 503)).toBe(true)
+    expect(r2.requests.filter((r) => r.kind === 'schedule' && r.status === 200).length).toBeGreaterThanOrEqual(10)
+    // Only the failed channel is read from Redis (metered); the rest stay on R2.
+    expect(redis.count('schedule')).toBeLessThanOrEqual(1)
+  })
 
   test('a schedule missing from R2 is read from Redis for the same generation', async ({ page, context }) => {
     const redis = await installUpstashMock(context)

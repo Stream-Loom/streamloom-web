@@ -57,6 +57,8 @@ export interface R2Mock {
   patchMeta(patch: Record<string, unknown>): void
   /** Makes `kind` (or every kind) fail in `fault` mode until `clearFaults()`. */
   fail(kind: R2Kind | 'all', fault?: R2Fault): void
+  /** Makes every object whose path (relative to `catalogue/`) matches `pattern` fail in `fault` mode. */
+  failPath(pattern: RegExp, fault?: R2Fault): void
   clearFaults(): void
 }
 
@@ -109,6 +111,7 @@ export function createR2Server(): R2Server {
   let golden: Record<string, GoldenObject> | null = null
   let metaPatch: Record<string, unknown> = {}
   const faults = new Map<R2Kind | 'all', R2Fault>()
+  const pathFaults: { pattern: RegExp; fault: R2Fault }[] = []
   const compressed = new Map<string, Buffer>()
 
   const mock: R2Mock = {
@@ -120,7 +123,8 @@ export function createR2Server(): R2Server {
     useGolden: () => { golden = readGolden() },
     patchMeta: (patch) => { metaPatch = { ...metaPatch, ...patch } },
     fail: (kind, fault = 'status') => { faults.set(kind, fault) },
-    clearFaults: () => { faults.clear() },
+    failPath: (pattern, fault = 'status') => { pathFaults.push({ pattern, fault }) },
+    clearFaults: () => { faults.clear(); pathFaults.length = 0 },
   }
 
   /** The decoded JSON of one object, or null when there is no such object. */
@@ -178,7 +182,8 @@ export function createR2Server(): R2Server {
       return
     }
 
-    const fault = faults.get(kind) ?? faults.get('all')
+    const fault =
+      pathFaults.find((f) => f.pattern.test(path))?.fault ?? faults.get(kind) ?? faults.get('all')
     if (fault === 'reset') {
       log(0, 0)
       req.socket.destroy()
@@ -239,6 +244,7 @@ export function createR2Server(): R2Server {
       golden = null
       metaPatch = {}
       faults.clear()
+      pathFaults.length = 0
       compressed.clear()
       mock.requests.length = 0
     },

@@ -31,8 +31,12 @@ const BASE_URL = (
   ((import.meta.env.VITE_CATALOGUE_R2_BASE_URL as string | undefined) ?? '').trim().replace(/\/+$/, '')
 )
 
-/** True when a snapshot base URL is configured (the build refuses to ship without one). */
+/** True when a usable snapshot base URL is configured (the build refuses to ship without one). */
 export const isR2Configured = /^https?:\/\//i.test(BASE_URL)
+
+if (BASE_URL && !isR2Configured) {
+  console.warn('[catalogue] VITE_CATALOGUE_R2_BASE_URL must start with http:// or https://; R2 is disabled')
+}
 
 /** Ceiling on one object's transfer size; the real ones are a few hundred KB brotli. */
 const MAX_BYTES = 8 * 1024 * 1024
@@ -43,36 +47,47 @@ export const R2_CATALOGUE_BUDGET_MS = 8_000
 export const R2_EPG_BUDGET_MS = 6_000
 
 /**
- * After a transport failure R2 is skipped for this long, so a dead CDN costs one
- * timeout rather than one per request (a screenful of guide rows would otherwise
- * each wait out its own).
+ * After a transport failure of `meta.json` or a bulk object R2 is skipped for this
+ * long, so a dead CDN costs one timeout rather than one per request.
+ *
+ * A single schedule object failing does not trip it (one bad object says nothing
+ * about the rest); EPG_TRIP_AFTER failures in a row do, so a CDN that dies
+ * mid-session is still given up on after a few rows instead of one wait per row.
  */
 const COOLDOWN_MS = 30_000
+const EPG_TRIP_AFTER = 3
 let downUntil = 0
+let epgFailuresInARow = 0
 
 const available = () => isR2Configured && Date.now() >= downUntil
 const markDown = () => { downUntil = Date.now() + COOLDOWN_MS }
 
-/** Test seam: forgets a recorded failure. */
-export function resetR2Cooldown() { downUntil = 0 }
+/** Reason a sibling request aborts its peers; not a transport failure of its own. */
+const SIBLING = 'sibling-failed'
 
 /**
  * GETs and JSON-decodes one object; null on any failure.
  *
- * A 4xx is a definite "not there" and does not mark R2 down; a network error,
- * timeout, 5xx or undecodable body does.
+ * A 4xx is a definite "not there" and is no transport failure; a network error,
+ * timeout, 5xx or undecodable body is, and is reported through `onTransportFailure`.
  */
-async function getJson(url: string, ctl: AbortController): Promise<unknown | null> {
+async function getJson(
+  url: string,
+  ctl: AbortController,
+  onTransportFailure: () => void = markDown,
+): Promise<unknown | null> {
   try {
     const res = await fetch(url, { signal: ctl.signal })
     if (!res.ok) {
-      if (res.status >= 500) markDown()
+      if (res.status >= 500) onTransportFailure()
       return null
     }
     if (Number(res.headers.get('content-length') ?? 0) > MAX_BYTES) return null
     return await res.json()
   } catch {
-    markDown()
+    // Aborted by a sibling that already failed (and said so): not a second failure.
+    if (ctl.signal.aborted && ctl.signal.reason === SIBLING) return null
+    onTransportFailure()
     return null
   }
 }
@@ -107,7 +122,7 @@ export async function fetchCatalogueFromR2(meta: R2Meta): Promise<DecodedCatalog
   return withBudget(R2_CATALOGUE_BUDGET_MS, async (ctl) => {
     const get = async (name: 'channels' | 'streams' | 'categories') => {
       const value = await getJson(bulkUrl(BASE_URL, meta.generation, name), ctl)
-      if (value === null) ctl.abort()
+      if (value === null) ctl.abort(SIBLING)
       return value
     }
     const [channels, streams, categories] = await Promise.all([
@@ -133,5 +148,14 @@ export async function fetchEpgFromR2(channelId: string, generation: number): Pro
   if (!available()) return null
   const url = epgUrl(BASE_URL, generation, channelId)
   if (!url) return null
-  return withBudget(R2_EPG_BUDGET_MS, async (ctl) => decodeEpg(await getJson(url, ctl)))
+  return withBudget(R2_EPG_BUDGET_MS, async (ctl) => {
+    const programs = decodeEpg(
+      await getJson(url, ctl, () => {
+        epgFailuresInARow += 1
+        if (epgFailuresInARow >= EPG_TRIP_AFTER) markDown()
+      }),
+    )
+    if (programs) epgFailuresInARow = 0
+    return programs
+  })
 }
