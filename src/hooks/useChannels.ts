@@ -26,7 +26,6 @@ import {
   onStreamStateChange,
   unmarkStreamBroken,
 } from '../util/stream'
-import { resetIconResolution } from '../util/iconResolver'
 
 export type { EnrichedChannel }
 
@@ -297,10 +296,9 @@ loadData()
  */
 const REFRESH_INTERVAL_MS = 4 * 60 * 60 * 1000
 
-/** Drops cached schedules and icon lookups so the next refresh re-reads them. */
+/** Drops cached schedules so the next refresh re-reads them. */
 function invalidateEphemeralCaches() {
   _epgCache.clear()
-  resetIconResolution()
 }
 
 let _refreshTimer: ReturnType<typeof setInterval> | null = null
@@ -361,7 +359,7 @@ async function revalidateBrokenStreams() {
  *
  * Guarded so the timer exists once per module load even though `useChannels` is
  * called from every page. Each tick re-reads the catalogue, clears the schedule
- * and icon caches, and re-probes streams that were previously marked dead.
+ * cache, and re-probes streams that were previously marked dead.
  */
 function startRefreshLoop() {
   if (_refreshTimer) return

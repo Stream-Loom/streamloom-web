@@ -193,6 +193,15 @@ export const onRequest: PagesFunction = async (context) => {
       responseHeaders.set('X-Edge-POP', cfColo)
       responseHeaders.delete('X-Frame-Options')
       responseHeaders.delete('Content-Security-Policy')
+      // The upstream is whatever the caller named, and this response is served
+      // from the app's own origin. Anyone can craft a link to
+      // /api/proxy?url=<their host>, so an SVG/XHTML/XML body would otherwise run
+      // its script with the app's origin if opened as a page. `sandbox` gives
+      // such a document an opaque origin with no script; it has no effect on
+      // playlists, segments or <video>, which are fetched rather than navigated
+      // to. Cookies are dropped because the proxy never forwards them upstream.
+      responseHeaders.set('Content-Security-Policy', 'sandbox')
+      responseHeaders.delete('Set-Cookie')
 
       // Inspect text if content type indicates text/m3u8 or if filename indicates m3u8
       const likelyM3U8 =

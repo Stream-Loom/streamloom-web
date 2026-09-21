@@ -1,21 +1,22 @@
 /**
  * Cloudflare Pages Function: /api/streams
  *
- * Probes candidate stream URLs via short Range requests and publishes the
- * verified working + dead list to two layers:
+ * Probes candidate stream URLs via short Range requests and returns the verified
+ * working + dead list, cached per edge POP in `caches.default` (2 h TTL) so a
+ * swarm of visitors on the same POP never re-probes.
  *
- * 1. `caches.default` — per-edge-POP short-lived cache (2 h TTL) so a swarm
- *    of visitors on the same POP never re-probes.
- * 2. `ICONS_BUCKET` R2 — globally geo-replicated key-value store under
- *    `stream-verify/<channelId>.json`. Every POP can read this so the
- *    cross-colo inconsistency where channel X "works" for one user and not
- *    another is removed. The companion endpoint at
- *    `/api/streams/known/:channelId` exposes this record.
+ * The first candidate (and the second if the first fails) is probed
+ * synchronously so the request returns within ~5 s of the user tapping a
+ * channel. The remaining candidates are probed in the background via
+ * `context.waitUntil()`.
  *
- * The probe itself still runs synchronously on the first candidate (and the
- * second if the first fails) so the request returns within ~5 s of the user
- * tapping a channel. The remaining candidates are probed in the background
- * via `context.waitUntil()` and the result is published to R2.
+ * This route does not write to R2. It used to publish every result to
+ * `stream-verify/<channelId>.json`, but the channel id and the candidate URLs
+ * both come from the query string of an unauthenticated request, so any caller
+ * could overwrite the record `/api/streams/known/:channelId` serves to every
+ * visitor. A record other visitors trust has to be written by something that
+ * can be trusted, which a public route cannot be without a secret. The reader
+ * stays; its writer is the backend probe.
  *
  * Honesty: a stream that is "live" from one POP can still be geo-fenced for
  * a different POP, so verification is best-effort, not a guarantee.
@@ -29,9 +30,6 @@ interface EdgeStreamsPayload {
   edgeNode: string
   timestamp: number
 }
-
-/** TTL the global R2 record advertises to clients. */
-const GLOBAL_TTL_MS = 6 * 60 * 60 * 1000 // 6 hours
 
 /** Higher score wins. Unknown resolutions rank lowest so named ones always win. */
 function rankResolution(quality: string | null | undefined): number {
@@ -94,42 +92,6 @@ async function probeStreamEndpoint(url: string, timeoutMs = 2500): Promise<boole
 export const onRequest: PagesFunction = async (context) => {
   const { request } = context
   const urlObj = new URL(request.url)
-
-  // Global, geo-replicated verification store. Optional so the function still
-  // serves when the binding is absent; the per-POP `caches.default` path below
-  // is the only layer that degrades.
-  // @ts-ignore -- ICONS_BUCKET is provided by the Pages binding
-  const bucket = (context.env as { ICONS_BUCKET?: unknown } | undefined)?.ICONS_BUCKET as
-    | { put: (k: string, v: string, opts?: { httpMetadata?: { contentType?: string } }) => Promise<unknown> }
-    | undefined
-
-  /**
-   * Publishes a verification record to the global R2 store so any future
-   * visitor on any POP can read it from `/api/streams/known/:channelId`.
-   * Best-effort: a R2 outage must never break this endpoint.
-   */
-  const publishVerified = (working: string[], dead: string[]) => {
-    if (!bucket) return
-    if (channelId === 'unknown' || channelId === '') return
-    const body = JSON.stringify({
-      channelId,
-      workingStream: working[0] ?? null,
-      workingCandidates: working,
-      deadCandidates: dead,
-      verifiedAt: Date.now(),
-      ttlMs: GLOBAL_TTL_MS,
-    })
-    const job = bucket
-      .put(`stream-verify/${encodeURIComponent(channelId)}.json`, body, {
-        httpMetadata: { contentType: 'application/json; charset=utf-8' },
-      })
-      .catch(() => {
-        // R2 outages are non-fatal; the per-POP cache still serves.
-      })
-    if (typeof context.waitUntil === 'function') {
-      context.waitUntil(job)
-    }
-  }
 
   if (request.method === 'OPTIONS') {
     return new Response(null, {
@@ -265,10 +227,6 @@ export const onRequest: PagesFunction = async (context) => {
     }
   }
 
-  // Publish the synchronous-probe result to the global R2 store so visitors
-  // on a different edge POP do not re-probe and get a different answer.
-  publishVerified(workingCandidates, deadCandidates)
-
   // Background job to probe remaining candidates and populate edge cache
   const remainingCandidates = candidateUrls.filter(
     (u) => !workingCandidates.includes(u) && !deadCandidates.includes(u)
@@ -306,10 +264,6 @@ export const onRequest: PagesFunction = async (context) => {
         // Ignore cache storage errors
       }
     }
-
-    // Republish with the full set so the global store reflects the deeper
-    // probe result, not just the synchronous first/second pass.
-    publishVerified(payload.workingCandidates, payload.deadCandidates)
   }
 
   if (typeof context.waitUntil === 'function') {

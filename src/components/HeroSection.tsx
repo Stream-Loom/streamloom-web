@@ -2,7 +2,7 @@ import { useState, useEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
 import type { EnrichedChannel } from '../hooks/useChannels'
 import { formatCountryDisplay } from '../util/country'
-import { LOGO_SIZE, logoUrl, handleLogoError, logoDataAttrs } from '../util/logo'
+import { LOGO_SIZE, logoUrl, handleLogoError } from '../util/logo'
 import './HeroSection.css'
 
 interface Props {
@@ -14,7 +14,7 @@ export function HeroSection({ channels }: Props) {
   const [index, setIndex] = useState(0)
 
   // Rotate every 8 seconds across top 5 channels with streams & logos
-  const heroChannels = channels.filter((c) => c.stream && logoUrl(c.logo, c.id)).slice(0, 5)
+  const heroChannels = channels.filter((c) => c.stream && logoUrl(c.logo)).slice(0, 5)
 
   useEffect(() => {
     if (heroChannels.length <= 1) return
@@ -28,7 +28,7 @@ export function HeroSection({ channels }: Props) {
   if (!featured) return null
 
   const countryDisplay = formatCountryDisplay(featured.country)
-  const logoSrc = logoUrl(featured.logo, featured.id)!
+  const logoSrc = logoUrl(featured.logo)!
 
   return (
     <section className="hero noise">
@@ -46,7 +46,6 @@ export function HeroSection({ channels }: Props) {
         decoding="async"
         onError={handleLogoError}
         className="hero__bg"
-        {...logoDataAttrs(featured.id, featured.name, featured.country)}
       />
       <div className="hero__overlay" />
 
@@ -60,7 +59,6 @@ export function HeroSection({ channels }: Props) {
             decoding="async"
             onError={handleLogoError}
             className="hero__logo"
-            {...logoDataAttrs(featured.id, featured.name, featured.country)}
           />
         </div>
         <h1 className="hero__name">{featured.name}</h1>

@@ -156,98 +156,21 @@ function streamProxyPlugin(): Plugin {
   /**
    * Local stand-in for /api/icons (:channelId).
    *
-   * R2 only exists at the edge, so dev keeps resolved icons in memory. Behaviour
-   * mirrored from the Pages Function: read serves bytes, write fetches the source
-   * URL once and stores it, without overwriting an existing icon.
+   * R2 only exists at the edge, and the edge route is read-only, so dev has
+   * nothing to serve: reads answer 404 and every other method 405, exactly like
+   * an empty bucket. Keeps the client's fallback path identical in dev.
    */
-  const devIconStore = new Map<string, { body: Buffer; contentType: string }>()
-
-  const iconsHandler = async (req: any, res: any) => {
-    try {
-      if (req.method === 'OPTIONS') {
-        res.writeHead(204, { 'Access-Control-Allow-Origin': '*', 'Access-Control-Allow-Methods': 'GET, POST, OPTIONS' })
-        res.end()
-        return
-      }
-
-      const reqUrl = new URL(req.url ?? '', `http://${req.headers.host || 'localhost'}`)
-      const channelId = decodeURIComponent(reqUrl.pathname.split('/').filter(Boolean).pop() || '')
-      if (!channelId || !/^[A-Za-z0-9._-]{1,128}$/.test(channelId)) {
-        res.writeHead(400, { 'Access-Control-Allow-Origin': '*' })
-        res.end('Invalid channel id')
-        return
-      }
-
-      if (req.method === 'GET') {
-        const stored = devIconStore.get(channelId)
-        if (!stored) {
-          res.writeHead(404, { 'Access-Control-Allow-Origin': '*' })
-          res.end('Not found')
-          return
-        }
-        res.writeHead(200, {
-          'Content-Type': stored.contentType,
-          'Cache-Control': 'public, max-age=31536000, immutable',
-          'Access-Control-Allow-Origin': '*',
-        })
-        res.end(stored.body)
-        return
-      }
-
-      if (req.method === 'POST') {
-        const existing = devIconStore.get(channelId)
-        if (existing) {
-          res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' })
-          res.end(JSON.stringify({ stored: false, url: `/api/icons/${channelId}` }))
-          return
-        }
-
-        const chunks: Buffer[] = []
-        for await (const chunk of req) chunks.push(chunk as Buffer)
-        let sourceUrl = ''
-        try {
-          sourceUrl = (JSON.parse(Buffer.concat(chunks).toString('utf8')) as { url?: string }).url || ''
-        } catch {}
-
-        let parsed: URL | null = null
-        try { parsed = new URL(sourceUrl) } catch {}
-        if (!parsed || !['http:', 'https:'].includes(parsed.protocol)) {
-          res.writeHead(400, { 'Access-Control-Allow-Origin': '*' })
-          res.end('Invalid url')
-          return
-        }
-
-        const upstream = await fetch(parsed.toString())
-        if (!upstream.ok) {
-          res.writeHead(502, { 'Access-Control-Allow-Origin': '*' })
-          res.end('Upstream icon unavailable')
-          return
-        }
-        const contentType = (upstream.headers.get('content-type') || '').split(';')[0].trim().toLowerCase()
-        if (!contentType.startsWith('image/')) {
-          res.writeHead(415, { 'Access-Control-Allow-Origin': '*' })
-          res.end('Unsupported image type')
-          return
-        }
-
-        const body = Buffer.from(await upstream.arrayBuffer())
-        if (body.byteLength === 0 || body.byteLength > 512 * 1024) {
-          res.writeHead(413, { 'Access-Control-Allow-Origin': '*' })
-          res.end('Icon rejected by size limits')
-          return
-        }
-
-        devIconStore.set(channelId, { body, contentType })
-        res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' })
-        res.end(JSON.stringify({ stored: true, url: `/api/icons/${channelId}` }))
-        return
-      }
-
-      res.writeHead(405, { 'Access-Control-Allow-Origin': '*' })
+  const iconsHandler = (req: any, res: any) => {
+    const cors = { 'Access-Control-Allow-Origin': '*', 'Access-Control-Allow-Methods': 'GET, HEAD, OPTIONS' }
+    if (req.method === 'OPTIONS') {
+      res.writeHead(204, cors)
+      res.end()
+    } else if (req.method === 'GET' || req.method === 'HEAD') {
+      res.writeHead(404, cors)
+      res.end('Not found')
+    } else {
+      res.writeHead(405, { ...cors, Allow: 'GET, HEAD, OPTIONS' })
       res.end('Method not allowed')
-    } catch (err: any) {
-      res.writeHead(500, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' })
-      res.end(JSON.stringify({ error: err.message || 'Internal error' }))
     }
   }
 

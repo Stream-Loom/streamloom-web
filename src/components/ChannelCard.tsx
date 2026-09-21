@@ -1,11 +1,10 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback } from 'react'
 import { useNavigate, useLocation } from 'react-router-dom'
 import type { EnrichedChannel } from '../hooks/useChannels'
 import type { EpgProgram } from '../api/types'
 import { useFavourites } from '../hooks/useChannels'
 import { formatCountryDisplay } from '../util/country'
-import { LOGO_SIZE, logoUrl, handleLogoError, logoDataAttrs } from '../util/logo'
-import { onIconResolved, scheduleIconBackfill } from '../util/iconResolver'
+import { LOGO_SIZE, logoUrl, handleLogoError } from '../util/logo'
 import './ChannelCard.css'
 
 interface Props {
@@ -20,18 +19,6 @@ export function ChannelCard({ channel, nowPlaying, size = 'medium', onWatch, pla
   const navigate = useNavigate()
   const location = useLocation()
   const { isFavourite, toggle } = useFavourites()
-  // Repaints the tile when a backfilled icon lands for this channel.
-  const [, setIconTick] = useState(0)
-
-  useEffect(() => {
-    // Only channels with no icon at all are queued here. A CDN icon that 404s is
-    // queued by handleLogoError instead, so a working icon never costs a lookup.
-    if (!channel.logo?.trim()) scheduleIconBackfill(channel.id, channel.name, channel.country)
-    return onIconResolved((resolvedId) => {
-      // Scoped to this card: a wave of resolutions must not repaint every tile.
-      if (resolvedId === channel.id) setIconTick((t) => t + 1)
-    })
-  }, [channel.id, channel.name, channel.country, channel.logo])
 
   const hasStream = !!channel.stream
   const fav = isFavourite(channel.id)
@@ -67,7 +54,7 @@ export function ChannelCard({ channel, nowPlaying, size = 'medium', onWatch, pla
   }, [channel.id, toggle])
 
   const countryDisplay = formatCountryDisplay(channel.country)
-  const logoSrc = logoUrl(channel.logo, channel.id)
+  const logoSrc = logoUrl(channel.logo)
 
   return (
     <article
@@ -95,7 +82,6 @@ export function ChannelCard({ channel, nowPlaying, size = 'medium', onWatch, pla
             loading="lazy"
             decoding="async"
             onError={handleLogoError}
-            {...logoDataAttrs(channel.id, channel.name, channel.country)}
           />
         ) : (
           <span className="channel-card__initials">

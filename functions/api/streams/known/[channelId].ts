@@ -3,18 +3,13 @@
  *
  * Returns the global stream-verification record for a channel, if one exists.
  *
- * The companion probe endpoint at `/api/streams` runs candidate-by-candidate
- * Range requests against upstream HLS endpoints and writes the verified
- * working + dead candidates to the `channel-icons` R2 bucket (keyed by
- * channel id). This endpoint reads that record back so any visitor, on any
- * edge POP, sees the same verified truth instead of re-probing and possibly
- * getting a different answer because of POP-specific network reachability.
- *
- * The R2 bucket is the same one used by `/api/icons`; it is geo-replicated
- * by Cloudflare so reads are consistent across POPs. Writes from `/api/streams`
- * are eventually consistent (typically within a few seconds), which is fine
- * for verification data whose worst-case staleness is capped by the periodic
- * client-side re-validation loop.
+ * The record lives in the `channel-icons` R2 bucket (`stream-verify/<id>.json`).
+ * No public route writes it: `/api/streams` used to publish here from
+ * query-string input, which let any caller overwrite what every visitor reads.
+ * It needs a trusted writer (the backend probe, holding R2 credentials); until
+ * one exists this returns 404 and the client falls back to a live probe. Reads
+ * are consistent across POPs because R2 is geo-replicated, and the client
+ * re-validates past `ttlMs`.
  *
  * Routes:
  *   GET /api/streams/known/:channelId  -> verified record, or 404
