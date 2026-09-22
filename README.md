@@ -26,17 +26,39 @@
 - **React 19** + **TypeScript** + **Vite 8**
 - **HLS.js** for adaptive live streaming
 - **Cloudflare Pages** for global Anycast edge delivery
-- **Upstash Redis** read-only edge cache (ADR-0015) — the browser only data source
+- **R2 snapshots** (ADR-0030) — the primary catalogue read path: immutable brotli objects behind a public hostname
+- **Upstash Redis** read-only edge cache (ADR-0015) — the fallback when R2 cannot serve the catalogue
 - **Supabase** — backend source of truth, synced into Redis (never called from the browser)
 - **vite-plugin-pwa** + Workbox for service worker & installability
 
 ---
 
-## Redis data contract
+## R2 snapshot contract (primary)
 
-The browser reads only from Upstash Redis (ADR-0015). Supabase is never
-called from the client; the sync worker publishes into Redis and the app
-reads it back.
+The browser reads the catalogue from R2 first (ADR-0030, ADR-0034 in
+streamloom-backend) and falls through to Redis on any miss, malformed object or
+timeout. The base URL is the build-time setting `VITE_CATALOGUE_R2_BASE_URL`.
+
+- catalogue/meta.json                      -> { generation, version: 2, layout: 1, syncedAt, hash, guide, counts }
+- catalogue/g<N>/channels.json.br          -> Channel[]
+- catalogue/g<N>/streams.json.br           -> Stream[]
+- catalogue/g<N>/categories.json.br        -> Category[]
+- catalogue/g<N>/epg/ids.json.br           -> string[]      (channel ids with schedules)
+- catalogue/g<N>/epg/<channelId>.json.br   -> EpgProgram[]  (per-channel schedule, on demand)
+
+Every generation object is served `Content-Encoding: br`, so the browser decodes
+it itself. A client fetches `meta.json`, compares `generation` with the stored
+one and downloads the generation's objects only when it differs. An unknown
+`version` or `layout` is refused, and a bulk object whose row count disagrees
+with `meta.counts` is treated as malformed. `src/api/r2Contract.ts` holds the
+contract (pure, decoded against `e2e/support/r2-golden.json`), `src/api/r2.ts`
+the fetching and `src/api/catalogueSource.ts` the R2-then-Redis order.
+
+## Redis data contract (fallback)
+
+When R2 cannot serve the catalogue the browser reads Upstash Redis (ADR-0015).
+Supabase is never called from the client; the sync worker publishes into Redis
+and the app reads it back.
 
 - catalogue:meta                    -> { generation, version, pages }
 - catalogue:g<N>:channels:page:<i>  -> Channel[]
@@ -59,19 +81,21 @@ concurrently.
 Copy `.env.example` to `.env`:
 
 ```bash
+VITE_CATALOGUE_R2_BASE_URL=https://your-catalogue-hostname
 VITE_UPSTASH_REDIS_REST_URL=https://your-upstash-endpoint.upstash.io
 VITE_UPSTASH_REDIS_REST_READONLY_TOKEN=your_upstash_readonly_token
 ```
 
-Both are required — without them the app has no catalogue to read.
+All three are required: the first is the primary read path, the other two the fallback.
 
 ### Build-time enforcement
 
-The build refuses to run without both variables:
+The build refuses to run without them:
 
 ```bash
 $ npm run build
 StreamLoom build aborted: required environment variables are missing.
+  - Catalogue R2 base URL (set any of: VITE_CATALOGUE_R2_BASE_URL)
   - Upstash Redis REST URL (set any of: VITE_UPSTASH_REDIS_REST_URL, ...)
   - Upstash Redis read-only token (set any of: VITE_UPSTASH_REDIS_REST_READONLY_TOKEN, ...)
 ```
@@ -144,10 +168,11 @@ Dashboard -> Workers & Pages -> your project -> Settings
   -> repeat, choosing the Preview environment
 ```
 
-Both required variables:
+Required variables:
 
 | Variable | Where to find it |
 |---|---|
+| `VITE_CATALOGUE_R2_BASE_URL` | The public (custom) hostname of the `streamloom-catalogue` R2 bucket, no trailing slash; it serves `catalogue/meta.json` |
 | `VITE_UPSTASH_REDIS_REST_URL` | Upstash console -> Redis -> REST API -> Endpoint |
 | `VITE_UPSTASH_REDIS_REST_READONLY_TOKEN` | Upstash console -> Redis -> REST API -> Read Only Token |
 

@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import type { Category, EnrichedChannel, EpgProgram } from '../api/types'
-import { fetchEpgFromRedis, resolveGeneration } from '../api/redis'
+import { fetchEpg, resolveGeneration } from '../api/catalogueSource'
 import { persistSchedules, readPersistedSchedules } from '../util/scheduleLoader'
 import {
   PIXELS_PER_MINUTE,
@@ -115,10 +115,10 @@ function isCoolingDown(channelId: string): boolean {
   return false
 }
 
-/** Reads one schedule from Redis, pinned to the generation the caller keys storage by. */
+/** Reads one schedule (R2, then Redis), pinned to the generation the caller keys storage by. */
 async function loadEpg(channelId: string, generation: number): Promise<EpgProgram[]> {
   try {
-    const data = await fetchEpgFromRedis(channelId, generation)
+    const data = await fetchEpg(channelId, generation)
     if (data.length > 0) {
       emptyRetryAt.delete(channelId)
       cacheEpg(channelId, data)
@@ -148,8 +148,8 @@ interface PrefetchPass {
 }
 
 /**
- * Loads schedules for `ids`: from IndexedDB where stored, otherwise from Redis at
- * most FETCH_CONCURRENCY at a time, then stores what Redis returned.
+ * Loads schedules for `ids`: from IndexedDB where stored, otherwise from the network at
+ * most FETCH_CONCURRENCY at a time, then stores what it returned.
  *
  * Notifications are coalesced per animation frame: a screenful of schedules
  * arrives as dozens of separate awaits, and repainting per channel would cost
