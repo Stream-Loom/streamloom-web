@@ -1,9 +1,10 @@
 import { useEffect, useMemo, useState } from 'react'
 import { ChannelCard } from './ChannelCard'
-import { fetchPicksFromR2 } from '../api/r2'
+import { fetchFastTrackFromR2, fetchPicksFromR2 } from '../api/r2'
 import { orderPickItems } from '../api/r2Contract'
-import type { PickItem, PicksDocument } from '../api/r2Contract'
+import type { FastTrackEntry, PickItem, PicksDocument } from '../api/r2Contract'
 import type { EnrichedChannel } from '../hooks/useChannels'
+import type { Stream } from '../api/types'
 import './PicksRow.css'
 
 /**
@@ -22,20 +23,23 @@ import './PicksRow.css'
  * A pin whose channel has no stream is shown, greyed, labelled "No stream
  * available" — it is what the author asked for and it is honest about the state.
  *
- * A pin whose channel is not in the live generation at all (ADR-0042) is drawn
- * from the identity snapshot the portal saved alongside it — name, country,
- * categories, no stream, no logo — rather than left out until the next sync:
- * the whole point of pinning something new is seeing it appear now, not after
- * up to a sync interval. It is labelled "Not yet in the catalogue" rather than
- * "No stream available": the two are different facts (one may still get a
- * stream on the next sync; the other has been probed and genuinely has none),
- * and conflating them would tell the author their save did nothing. A pin with
- * neither a live-generation match nor a snapshot — only possible for a document
- * saved before this field existed — still counts as "pending" and is left out,
- * exactly as every pin was before.
+ * A pin not in the live generation resolves two ways, in order:
  *
- * Any read failure renders nothing at all: an absent row is better than a broken
- * one, and `picks.json` may simply never have been published.
+ * 1. **A fast-track entry (ADR-0043, WO-19)** — a real, probed stream a narrow backend job
+ *    found within seconds of the save, before the next scheduled sync. Rendered exactly like a
+ *    live-generation match: playable, no "pending" label, because it carries a verdict as real
+ *    as the scheduled sync's own.
+ * 2. **The identity snapshot the portal saved alongside the pin (ADR-0042)** — name, country,
+ *    categories, no stream, no logo — when there is no fast-track entry yet either. Labelled
+ *    "Not yet in the catalogue" rather than "No stream available": the two are different facts
+ *    (one may still get a stream; the other has been probed and genuinely has none), and
+ *    conflating them would tell the author their save did nothing.
+ *
+ * A pin with none of the three — only possible for a document saved before ADR-0042 existed —
+ * still counts as "pending" and is left out, exactly as every pin was before either of these.
+ *
+ * Any read failure renders nothing at all: an absent row is better than a broken one, and
+ * neither `picks.json` nor `fast-track.json` may ever have been published.
  */
 
 interface Props {
@@ -81,8 +85,28 @@ function synthesizeChannel(item: PickItem): EnrichedChannel | null {
   }
 }
 
+/**
+ * Builds a playable channel from a fast-track entry (ADR-0043) — the one case here with a real
+ * `stream`, because it is the one case built from a real probe rather than an absence of one.
+ */
+function synthesizeFastTrackChannel(entry: FastTrackEntry): EnrichedChannel {
+  const stream: Stream = { channel_id: entry.channelId, url: entry.stream.url, quality: entry.stream.quality, status: 'active' }
+  return {
+    id: entry.channelId,
+    name: entry.name,
+    logo: null,
+    country: entry.country,
+    is_active: true,
+    channel_categories: entry.categories.map((category_id) => ({ category_id })),
+    stream,
+    streams: [stream],
+    categoryIds: entry.categories,
+  }
+}
+
 export function PicksRow({ channels, onWatch }: Props) {
   const [picks, setPicks] = useState<PicksDocument | null>(null)
+  const [fastTrack, setFastTrack] = useState<FastTrackEntry[] | null>(null)
 
   useEffect(() => {
     let cancelled = false
@@ -98,11 +122,33 @@ export function PicksRow({ channels, onWatch }: Props) {
     }
   }, [])
 
+  useEffect(() => {
+    let cancelled = false
+    // Independent of the picks fetch above and never blocks it: fast-track.json is a bonus, not
+    // a dependency — a failure or a slow read here still leaves ADR-0042's identity card working.
+    fetchFastTrackFromR2()
+      .then((entries) => {
+        if (!cancelled) setFastTrack(entries)
+      })
+      .catch(() => {
+        // Absent on any read error, by design.
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
   const byId = useMemo(() => {
     const map = new Map<string, EnrichedChannel>()
     for (const channel of channels) map.set(channel.id, channel)
     return map
   }, [channels])
+
+  const byFastTrack = useMemo(() => {
+    const map = new Map<string, FastTrackEntry>()
+    for (const entry of fastTrack ?? []) map.set(entry.channelId, entry)
+    return map
+  }, [fastTrack])
 
   const groups = useMemo<ResolvedGroup[]>(() => {
     if (!picks) return []
@@ -114,6 +160,11 @@ export function PicksRow({ channels, onWatch }: Props) {
         const channel = byId.get(item.channelId)
         if (channel) {
           resolved.push({ channel, note: item.note, pending: false })
+          continue
+        }
+        const fastTracked = byFastTrack.get(item.channelId)
+        if (fastTracked) {
+          resolved.push({ channel: synthesizeFastTrackChannel(fastTracked), note: item.note, pending: false })
           continue
         }
         const synthesized = synthesizeChannel(item)
@@ -129,7 +180,7 @@ export function PicksRow({ channels, onWatch }: Props) {
       out.push({ title: group.title, picks: resolved, pendingCount })
     }
     return out
-  }, [picks, byId])
+  }, [picks, byId, byFastTrack])
 
   if (groups.length === 0) return null
 

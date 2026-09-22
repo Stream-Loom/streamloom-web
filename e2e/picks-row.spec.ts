@@ -56,8 +56,26 @@ function picksDocument() {
           },
         ],
       },
+      // Not in the catalogue either, but a fast-track entry (ADR-0043, WO-19) exists for it:
+      // it must render as playable, not as an identity-only card.
+      { title: 'Fast-tracked', items: [{ channelId: 'fast-tracked.zz', rank: 0 }] },
       // The author left this one empty; an empty group is the one thing that hides a row.
       { title: 'Empty on purpose', items: [] },
+    ],
+  }
+}
+
+function fastTrackDocument() {
+  return {
+    schema: 1,
+    entries: [
+      {
+        channelId: 'fast-tracked.zz',
+        name: 'Fast-Tracked Channel',
+        country: 'ZZ',
+        categories: ['news'],
+        stream: { url: 'https://example.invalid/fast-tracked.m3u8', quality: '1080p' },
+      },
     ],
   }
 }
@@ -74,6 +92,7 @@ async function openHome(page: Page, context: Parameters<typeof installUpstashMoc
 test.beforeEach(() => {
   r2Server.reset(CATALOGUE)
   r2.setPicks(picksDocument())
+  r2.setFastTrack(fastTrackDocument())
 })
 
 test('pinned channels are shown, with the note and the no-stream state', async ({ page, context }) => {
@@ -114,6 +133,17 @@ test('a pin not yet in the catalogue renders from its saved snapshot (ADR-0042)'
   await expect(row).toContainText('Not yet in the catalogue')
   await expect(row).not.toContainText('No stream available')
   await expect(row.getByRole('button', { name: 'Play Brand New Channel', exact: true })).toHaveCount(0)
+})
+
+test('a fast-tracked pin renders as playable, not as an identity-only card (ADR-0043, WO-19)', async ({ page, context }) => {
+  await openHome(page, context)
+
+  const row = picksRow(page, 'Fast-tracked')
+  await expect(row).toBeVisible()
+  await expect(row).toContainText('Fast-Tracked Channel')
+  await expect(row.getByRole('button', { name: 'Play Fast-Tracked Channel', exact: true })).toBeVisible()
+  await expect(row).not.toContainText('Not yet in the catalogue')
+  await expect(row).not.toContainText('No stream available')
 })
 
 test('a broken mark does not hide a pin, even with hide-broken turned on', async ({ page, context }) => {
