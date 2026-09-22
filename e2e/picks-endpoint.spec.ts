@@ -827,8 +827,12 @@ test.describe('the JWKS is fetched from the team and nowhere else', () => {
       globalThis.fetch = original
     }
     // A redirect would hand the `*.cloudflareaccess.com` constraint back to
-    // whatever answered; signing keys from a redirect target are not the team's.
-    expect(init?.redirect).toBe('error')
+    // whatever answered; signing keys from a redirect target are not the
+    // team's. `'manual'`, not the spec's `'error'`: workerd — the runtime this
+    // Function actually runs on in production — only implements `'follow'`
+    // and `'manual'` and throws for anything else, so `'error'` fails every
+    // request closed with a 503 before a redirect is ever in play.
+    expect(init?.redirect).toBe('manual')
   })
 
   test('a redirected certs endpoint fails closed with 503, never open', async () => {
@@ -837,8 +841,12 @@ test.describe('the JWKS is fetched from the team and nowhere else', () => {
     globalThis.fetch = (async (input: RequestInfo | URL, options?: RequestInit) => {
       const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url
       if (url === CERTS) {
-        // What `redirect: 'error'` does to a 302: the fetch rejects.
-        if (options?.redirect === 'error') throw new TypeError('unexpected redirect')
+        // What `redirect: 'manual'` does to a 302: the fetch resolves with the
+        // 3xx response itself, unfollowed — never rejects. `fetchJwks`'s own
+        // `!res.ok` then refuses it (`res.ok` is true only for 200–299).
+        if (options?.redirect === 'manual') {
+          return new Response(null, { status: 302, headers: { location: 'https://attacker.example/keys' } })
+        }
         return new Response(jwks(otherKey), { status: 200 })
       }
       return new Response('[]', { status: 200, headers: { 'content-type': 'application/json' } })

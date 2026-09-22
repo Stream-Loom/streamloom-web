@@ -218,12 +218,20 @@ async function fetchJwks(certsUrl: string): Promise<Map<string, CryptoKey> | nul
     const res = await fetch(certsUrl, {
       signal: ctl.signal,
       headers: { accept: 'application/json' },
-      // A redirect is an error, not something to follow. The certs URL is built
-      // from a hostname this module has already constrained to
-      // `*.cloudflareaccess.com`; following a redirect would hand that constraint
-      // back to whatever answered, and signing keys taken from a redirect target
-      // are keys chosen by someone other than the team.
-      redirect: 'error',
+      // A redirect must never be followed — the certs URL is built from a
+      // hostname this module has already constrained to
+      // `*.cloudflareaccess.com`; following a redirect would hand that
+      // constraint back to whatever answered, and signing keys taken from a
+      // redirect target are keys chosen by someone other than the team.
+      //
+      // `'error'` is the standard Fetch API spelling of that, but workerd (the
+      // runtime this Function actually runs on in production) only implements
+      // `'follow'` and `'manual'` and throws a TypeError for anything else —
+      // every request here failed closed with a 503 for exactly this reason.
+      // `'manual'` gets the same effect without the throw: a 3xx response is
+      // returned rather than followed, and `!res.ok` below already refuses it
+      // (`res.ok` is true only for 200–299).
+      redirect: 'manual',
       // Cloudflare's own cache; harmless where `cf` is not understood.
       cf: { cacheTtl: 3600, cacheEverything: true },
     } as RequestInit)
@@ -263,13 +271,7 @@ async function fetchJwks(certsUrl: string): Promise<Map<string, CryptoKey> | nul
       }
     }
     return out.size > 0 ? out : null
-  } catch (err) {
-    // TEMPORARY (diagnostic, to be reverted): every JWKS fetch failure in
-    // production returns 503 jwks-unavailable with no visible cause because
-    // this catch discarded it. Surface just the error's name/message — never
-    // the certs URL or any header — so `wrangler pages deployment tail` shows
-    // what is actually failing.
-    console.warn('[picks] jwks fetch failed:', err instanceof Error ? `${err.name}: ${err.message}` : String(err))
+  } catch {
     return null
   } finally {
     clearTimeout(timer)
