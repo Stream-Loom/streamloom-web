@@ -19,6 +19,19 @@ const REPO = 'Stream-Loom/streamloom-backend'
 const DISPATCH_URL = `https://api.github.com/repos/${REPO}/dispatches`
 const EVENT_TYPE = 'fast-track-pick'
 
+/**
+ * The real GitHub API by default; overridable only for the workerd smoke test
+ * (`e2e/support/workerd-smoke/`), which has no way to reach api.github.com and instead
+ * points this at a local stub to prove the `fetch` inside `waitUntil` actually completes
+ * under real workerd — the one thing the Node-stubbed e2e suite cannot model. Mirrors
+ * `IPTV_ORG_API_OVERRIDE` in the backend's `sync-worker/tools/fast-track.mjs`. Never set
+ * in Cloudflare's dashboard; there is nothing there to override it with.
+ */
+function dispatchUrl(env: unknown): string {
+  const override = (env as { FAST_TRACK_DISPATCH_URL_OVERRIDE?: unknown } | undefined)?.FAST_TRACK_DISPATCH_URL_OVERRIDE
+  return typeof override === 'string' && override.trim().length > 0 ? override.trim() : DISPATCH_URL
+}
+
 /** Bounds one save's cost: a bulk-add pins many channels at once, this dispatches for at most this many. */
 export const MAX_FAST_TRACK_IDS = 10
 
@@ -62,7 +75,7 @@ export async function dispatchFastTrack(env: unknown, channelIds: readonly strin
   const ctl = new AbortController()
   const timer = setTimeout(() => ctl.abort(), FETCH_TIMEOUT_MS)
   try {
-    const res = await fetch(DISPATCH_URL, {
+    const res = await fetch(dispatchUrl(env), {
       method: 'POST',
       signal: ctl.signal,
       headers: {
