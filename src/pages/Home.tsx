@@ -4,6 +4,7 @@ import { useChannels, useFavourites, useRecent } from '../hooks/useChannels'
 import type { EnrichedChannel } from '../hooks/useChannels'
 import { HeroSection } from '../components/HeroSection'
 import { CategoryRow } from '../components/CategoryRow'
+import { PicksRow } from '../components/PicksRow'
 import { SearchBar } from '../components/SearchBar'
 import { ChannelCard } from '../components/ChannelCard'
 import { FilterSheet } from '../components/FilterSheet'
@@ -52,7 +53,10 @@ const GRID_BATCH_SIZE = 36
 
 export function Home() {
   const location = useLocation()
-  const { channels, categories, loading, error, refresh } = useChannels()
+  // `allChannels` is the list before the hidden/broken filters. The picks row
+  // needs it: a pinned channel is never hidden by a broken mark or by the user's
+  // hide-broken setting (ADR-0033 §3). Nothing else on this page uses it.
+  const { channels, allChannels, categories, loading, error, refresh } = useChannels()
   const { favouriteIds } = useFavourites()
   const { recentIds, addRecent } = useRecent()
 
@@ -623,6 +627,9 @@ export function Home() {
           ) : (
             /* Normal row mode */
             <>
+              {/* Author's picks (ADR-0033): never filtered by a broken mark. */}
+              <PicksRow channels={allChannels} onWatch={handleWatch} />
+
               {/* Favourites row */}
               {favouriteChannels.length > 0 && (
                 <CategoryRow title="♥ Favourites" channels={favouriteChannels} onWatch={handleWatch} />

@@ -83,6 +83,15 @@ export function metaUrl(base: string): string {
   return base + '/catalogue/meta.json'
 }
 
+/**
+ * The author's picks (ADR-0033). Generation-independent, so it sits beside
+ * `meta.json` rather than inside `catalogue/g<N>/`, and it is plain JSON: it is
+ * a few kilobytes and is re-read far more often than a generation.
+ */
+export function picksUrl(base: string): string {
+  return base + '/catalogue/picks.json'
+}
+
 export type BulkObject = 'channels' | 'streams' | 'categories'
 
 export function bulkUrl(base: string, generation: number, name: BulkObject): string {
@@ -137,6 +146,80 @@ export const decodeCategories = (value: unknown): Category[] | null => rows<Cate
 export const decodeEpg = (value: unknown): EpgProgram[] | null => rows<EpgProgram>(value, isProgram)
 export const decodeEpgIds = (value: unknown): string[] | null =>
   rows<string>(value, (row) => typeof row === 'string')
+
+// ---- Author's picks ----
+
+/** Schema of `picks.json`; must match PICKS_SCHEMA in functions/api/_lib/picksSchema.ts. */
+export const PICKS_SCHEMA = 1
+
+export interface PickItem {
+  channelId: string
+  note?: string
+  rank?: number
+}
+
+export interface PickGroup {
+  title: string
+  items: PickItem[]
+}
+
+export interface PicksDocument {
+  schema: number
+  updatedAt?: string
+  groups: PickGroup[]
+}
+
+/**
+ * A picks document this client understands, or null.
+ *
+ * Deliberately lenient about *extra* fields a future portal might add and strict
+ * about the ones it reads: a row it cannot make sense of is dropped rather than
+ * failing the whole document, because one bad pin should not remove the row. An
+ * unknown `schema`, though, is refused outright — the meaning of the groups
+ * would be a guess.
+ */
+export function decodePicks(raw: unknown): PicksDocument | null {
+  if (!isRecord(raw)) return null
+  if (raw.schema !== PICKS_SCHEMA) return null
+  if (!Array.isArray(raw.groups)) return null
+
+  const groups: PickGroup[] = []
+  for (const rawGroup of raw.groups) {
+    if (!isRecord(rawGroup)) continue
+    if (typeof rawGroup.title !== 'string' || rawGroup.title.length === 0) continue
+    if (!Array.isArray(rawGroup.items)) continue
+
+    const items: PickItem[] = []
+    for (const rawItem of rawGroup.items) {
+      if (!isRecord(rawItem)) continue
+      if (typeof rawItem.channelId !== 'string' || rawItem.channelId.length === 0) continue
+      const item: PickItem = { channelId: rawItem.channelId }
+      if (typeof rawItem.note === 'string' && rawItem.note.length > 0) item.note = rawItem.note
+      if (typeof rawItem.rank === 'number' && Number.isFinite(rawItem.rank)) item.rank = rawItem.rank
+      items.push(item)
+    }
+    groups.push({ title: rawGroup.title, items })
+  }
+
+  return {
+    schema: PICKS_SCHEMA,
+    updatedAt: typeof raw.updatedAt === 'string' ? raw.updatedAt : undefined,
+    groups,
+  }
+}
+
+/** Items in the order the row shows them: by `rank`, then by the author's order. */
+export function orderPickItems(items: PickItem[]): PickItem[] {
+  return items
+    .map((item, index) => ({ item, index }))
+    .sort((a, b) => {
+      const ar = a.item.rank ?? Number.MAX_SAFE_INTEGER
+      const br = b.item.rank ?? Number.MAX_SAFE_INTEGER
+      if (ar !== br) return ar - br
+      return a.index - b.index
+    })
+    .map((entry) => entry.item)
+}
 
 export interface DecodedCatalogue {
   channels: Channel[]

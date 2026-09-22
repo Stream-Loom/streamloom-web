@@ -12,6 +12,12 @@ export interface CatalogueOptions {
   totalChannels?: number
   /** Publish schedules whose programmes have all ended, as a lagging feed does. */
   endedSchedules?: boolean
+  /**
+   * Channels at the end of the list published with no stream at all. The sync
+   * worker publishes a pinned channel whatever the publish filters say, including
+   * one with no stream (ADR-0033), so the picks row has to cope with it.
+   */
+  streamlessChannels?: number
 }
 
 export function scheduleFor(channelId: string, ended: boolean): unknown[] {
@@ -45,7 +51,8 @@ export function syntheticCatalogue(options: CatalogueOptions = {}) {
   }))
   // Every second channel has a backup candidate: 900 streams, which at 100 a page
   // gives the nine stream pages production publishes today.
-  const streams = channels.flatMap((c, i) =>
+  const streamless = options.streamlessChannels ?? 0
+  const streams = channels.slice(0, totalChannels - streamless).flatMap((c, i) =>
     Array.from({ length: i % 2 === 0 ? 2 : 1 }, (_, n) => ({
       channel_id: c.id,
       url: `https://streams.invalid/${c.id}-${n}.m3u8`,
