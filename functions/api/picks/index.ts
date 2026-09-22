@@ -125,6 +125,20 @@ function refuse(failure: AccessFailure): Response {
 const stripWeak = (etag: string): string => etag.replace(/^W\//, '').trim()
 
 /**
+ * The bare hash inside an ETag: no weak marker, no surrounding quotes.
+ *
+ * `stripWeak` above is for comparing two *header-shaped* values to each other
+ * (the client's `If-Match` against the stored `httpEtag`), where both sides
+ * carry quotes and the comparison is unaffected either way. R2's own
+ * `onlyIf.etagMatches`/`etagDoesNotMatch`, passed straight to the binding
+ * rather than compared here, is not header-shaped: it throws `TypeError:
+ * Conditional ETag should not be wrapped in quotes` if given the quoted form
+ * (found live, 2026-09-22 — every save after the first one hit this, because
+ * only a second save has a `current` object to build `onlyIf` from at all).
+ */
+const bareEtag = (etag: string): string => stripWeak(etag).replace(/^"|"$/g, '')
+
+/**
  * A three-method facade over the `CATALOGUE_BUCKET` binding, or null.
  *
  * Two jobs:
@@ -346,7 +360,7 @@ async function handleWrite(request: Request, bucket: CatalogueBucket): Promise<R
     // Re-checks the precondition at the store, closing the window between the read
     // above and this write. A first write has no ETag to match on; two simultaneous
     // first saves are the one race this cannot close, and both are kept in history.
-    ...(current ? { onlyIf: { etagMatches: stripWeak(current.httpEtag) } } : {}),
+    ...(current ? { onlyIf: { etagMatches: bareEtag(current.httpEtag) } } : {}),
   })
   if (!written) return conflict(bucket, 'picks.json changed while it was being written.')
 
