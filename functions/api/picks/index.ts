@@ -31,7 +31,7 @@
  */
 
 import { authoriseAccessRequest, type AccessFailure } from '../_lib/accessJwt'
-import { indexAgeMinutes, isIndexStale, judgeChannel, loadIptvIndex } from '../_lib/iptvOrg'
+import { indexAgeMinutes, isIndexStale, judgeChannel, loadIptvIndex, type IptvChannel } from '../_lib/iptvOrg'
 import {
   historyKeySegment,
   LIMITS,
@@ -39,6 +39,8 @@ import {
   pinnedIds,
   validatePicksInput,
   type PicksDocument,
+  type PicksInput,
+  type StoredPickGroup,
 } from '../_lib/picksSchema'
 
 /** The one object clients read (ADR-0030: generation-independent, outside `catalogue/g<N>/`). */
@@ -157,6 +159,31 @@ export function bindBucket(env: unknown): CatalogueBucket | null {
   }
 }
 
+/**
+ * Attaches each item's iptv-org identity snapshot, from `snapshotById` (ADR-0042).
+ *
+ * An item whose id is not in the map (it was refused — unreachable, since a
+ * refusal already returned 400 above — or, defensively, simply absent) is
+ * stored with no snapshot, exactly as every item was before this existed: the
+ * reader falls back to "pending" either way, never to a guess.
+ *
+ * Pure and total: every input item produces exactly one output item, in order.
+ */
+function snapshotGroups(
+  groups: PicksInput['groups'],
+  snapshotById: ReadonlyMap<string, IptvChannel>,
+): StoredPickGroup[] {
+  return groups.map((group) => ({
+    title: group.title,
+    items: group.items.map((item) => {
+      const snapshot = snapshotById.get(item.channelId)
+      return snapshot
+        ? { ...item, name: snapshot.name, country: snapshot.country, categories: snapshot.categories }
+        : { ...item }
+    }),
+  }))
+}
+
 /** The stored document, or null when the object is absent or unreadable. */
 async function readStored(object: R2Object): Promise<PicksDocument | null> {
   try {
@@ -267,6 +294,11 @@ async function handleWrite(request: Request, bucket: CatalogueBucket): Promise<R
 
   const refusals: string[] = []
   const warnings: string[] = []
+  // Every resolved channel's iptv-org identity, kept alongside the refusal scan
+  // (ADR-0042) rather than a second pass over the same ids: `judgeChannel` is a
+  // pure in-memory lookup against `index`, already fetched above, so keeping the
+  // result costs a Map entry, not a second read of anything.
+  const snapshotById = new Map<string, IptvChannel>()
   if (isIndexStale(index)) {
     const minutes = indexAgeMinutes(index)
     warnings.push(
@@ -275,8 +307,12 @@ async function handleWrite(request: Request, bucket: CatalogueBucket): Promise<R
   }
   for (const channelId of pinnedIds(validated.value)) {
     const verdict = judgeChannel(index, channelId)
-    if (verdict.verdict === 'refuse') refusals.push(verdict.reason)
-    else if (verdict.verdict === 'warn') warnings.push(verdict.warning)
+    if (verdict.verdict === 'refuse') {
+      refusals.push(verdict.reason)
+      continue
+    }
+    if (verdict.verdict === 'warn') warnings.push(verdict.warning)
+    snapshotById.set(channelId, verdict.channel)
   }
   if (refusals.length > 0) return json({ error: 'invalid-channels', errors: refusals }, 400)
 
@@ -286,7 +322,7 @@ async function handleWrite(request: Request, bucket: CatalogueBucket): Promise<R
   const document: PicksDocument = {
     schema: PICKS_SCHEMA,
     updatedAt,
-    groups: validated.value.groups,
+    groups: snapshotGroups(validated.value.groups, snapshotById),
   }
   const body = JSON.stringify(document)
 

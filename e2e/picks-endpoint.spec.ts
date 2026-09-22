@@ -604,6 +604,47 @@ test.describe('validation on save', () => {
     expect(objects.has('catalogue/picks.json')).toBe(true)
   })
 
+  test('a save embeds the iptv-org identity snapshot, never a stream (ADR-0042)', async () => {
+    const { bucket, objects } = makeBucket()
+    const res = await call(
+      picksHandler,
+      writeRequest(await goodToken(), {
+        schema: 1,
+        groups: [{ title: 'A', items: [{ channelId: 'BBCNews.uk', note: 'x' }] }],
+      }),
+      { ...ENV_VARS, CATALOGUE_BUCKET: bucket },
+    )
+    expect(res.status).toBe(200)
+    const stored = JSON.parse(objects.get('catalogue/picks.json')!.body)
+    const item = stored.groups[0].items[0]
+    expect(item.channelId).toBe('BBCNews.uk')
+    expect(item.note).toBe('x')
+    expect(item.name).toBe('BBC News')
+    expect(item.country).toBe('GB')
+    expect(item.categories).toEqual(['news'])
+    // Identity only, never anything stream-shaped: a URL, a quality, a status.
+    expect(JSON.stringify(item)).not.toMatch(/url|quality|status/i)
+  })
+
+  test('a client cannot set its own snapshot: the input schema has no such field', async () => {
+    const { bucket, mutations } = makeBucket()
+    const res = await call(
+      picksHandler,
+      writeRequest(await goodToken(), {
+        schema: 1,
+        groups: [{ title: 'A', items: [{ channelId: 'BBCNews.uk', name: 'Not The Real Name' }] }],
+      }),
+      { ...ENV_VARS, CATALOGUE_BUCKET: bucket },
+    )
+    // Refused outright, the same as any other unknown field — never silently
+    // dropped and never written through as-is. The value that does get stored
+    // for a valid save always comes from the server's own iptv-org read (the
+    // previous test), not from anything the client sent.
+    expect(res.status).toBe(400)
+    expect((await res.json()).errors.join(' ')).toContain('unknown field "name"')
+    expect(mutations).toEqual([])
+  })
+
   test('an unreachable iptv-org list fails the save closed, writing nothing', async () => {
     stub.iptvStatus = 500
     const { bucket, mutations } = makeBucket()

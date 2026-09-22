@@ -1,11 +1,16 @@
 /**
- * The author's-picks document: shape, limits and normalisation (ADR-0033 §1).
+ * The author's-picks document: shape, limits and normalisation (ADR-0033 §1, ADR-0042).
  *
- * Wire shape, exactly:
+ * Wire shape the portal sends, exactly:
  *   { schema: 1, groups: [ { title, items: [ { channelId, note?, rank? } ] } ] }
  *
  * `updatedAt` is added by the server and is never read from the request: a client
  * that could set it would control the history key and could rewrite the past.
+ * The stored document (`StoredPickItem`, ADR-0042) additionally carries a
+ * `name`/`country`/`categories` snapshot per item, also server-authored — see
+ * `snapshotItems` and its call site in `functions/api/picks/index.ts`, not here:
+ * this module has no I/O, and the snapshot comes from the iptv-org index the
+ * write path already fetches to validate the ids.
  *
  * Every rule here is a refusal, not a repair. Unknown keys are rejected rather
  * than dropped, so a field the portal stops sending cannot be smuggled past a
@@ -93,9 +98,34 @@ export interface PicksInput {
   groups: PickGroup[]
 }
 
+/**
+ * One item as stored in `picks.json` — the author's input plus a server-authored
+ * snapshot of the channel's iptv-org identity at save time (ADR-0042).
+ *
+ * `name`/`country`/`categories` are never taken from the request, for the same
+ * reason `updatedAt` isn't (a client that could set its own name could make a
+ * card lie about what it is showing); the write path fills them in from the
+ * same iptv-org index it already fetches to validate the id. Absent on an item
+ * whose channel could not be resolved at save time, and on every item saved
+ * before this field existed — both are handled by falling back to "pending"
+ * exactly as an absent snapshot always has (`PicksRow.tsx`).
+ */
+export interface StoredPickItem extends PickItem {
+  name?: string
+  country?: string | null
+  categories?: string[]
+}
+
+export interface StoredPickGroup {
+  title: string
+  items: StoredPickItem[]
+}
+
 /** What is stored. */
-export interface PicksDocument extends PicksInput {
+export interface PicksDocument {
+  schema: number
   updatedAt: string
+  groups: StoredPickGroup[]
 }
 
 export type ValidationResult =
