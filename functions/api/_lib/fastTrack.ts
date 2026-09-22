@@ -38,11 +38,24 @@ export function fastTrackConfigured(env: unknown): boolean {
  * a 2xx, rejects otherwise (a non-2xx status, a network error, or a timeout) — the caller decides
  * what "otherwise" means, which is always "log it, never surface it to the save's own response".
  *
- * A no-op, resolving immediately, when the token is unset or `channelIds` is empty: dispatching
- * with nothing to fast-track would just be a GitHub Actions run that immediately does nothing.
+ * A no-op, resolving immediately, when the token is unset or `channelIds` is empty. The two are
+ * NOT logged the same way: an empty `channelIds` is silent unconditionally (dispatching nothing
+ * to fast-track would just be a GitHub Actions run that immediately does nothing, and this is the
+ * common case on every save that only edits notes or reorders). A missing token with ids that
+ * genuinely needed dispatching gets one low-volume warning instead — 2026-09-22 found, the hard
+ * way, that "never configured" and "configured in Cloudflare but not yet reachable by this
+ * deployment" (Cloudflare Pages snapshots secrets per deployment; see CLAUDE.md's Secrets section)
+ * look identical from here, and the silence that was meant to spare an unconfigured project from
+ * noise instead hid a real, fixable outage for hours with zero signal anywhere.
  */
 export async function dispatchFastTrack(env: unknown, channelIds: readonly string[]): Promise<void> {
-  if (!fastTrackConfigured(env) || channelIds.length === 0) return
+  if (channelIds.length === 0) return
+  if (!fastTrackConfigured(env)) {
+    console.warn(
+      `[picks] fast-track not dispatched for ${channelIds.length} channel(s): no GITHUB_DISPATCH_TOKEN visible to this deployment. If one is configured in Cloudflare, a fresh Production deployment is needed for it to take effect.`,
+    )
+    return
+  }
   const token = (env as { GITHUB_DISPATCH_TOKEN: string }).GITHUB_DISPATCH_TOKEN.trim()
   const ids = channelIds.slice(0, MAX_FAST_TRACK_IDS)
 
