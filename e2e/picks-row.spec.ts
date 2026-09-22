@@ -42,6 +42,20 @@ function picksDocument() {
       },
       // Nothing in this group has reached the catalogue, so the row must not draw it.
       { title: 'Not yet published', items: [{ channelId: 'never-synced.zz', rank: 0 }] },
+      // Not in the catalogue either, but this save carries a snapshot (ADR-0042):
+      // it must render from it, not disappear like the group above.
+      {
+        title: 'Fresh picks',
+        items: [
+          {
+            channelId: 'brand-new.zz',
+            rank: 0,
+            name: 'Brand New Channel',
+            country: 'ZZ',
+            categories: ['news'],
+          },
+        ],
+      },
       // The author left this one empty; an empty group is the one thing that hides a row.
       { title: 'Empty on purpose', items: [] },
     ],
@@ -86,6 +100,20 @@ test('a group whose channels are not published yet is not drawn; an empty group 
   await expect(picksRow(page, 'Empty on purpose')).toHaveCount(0)
   // The unpublished pin is still counted, so the author can see it is waiting.
   await expect(picksRow(page, 'Editor picks')).toContainText('2')
+})
+
+test('a pin not yet in the catalogue renders from its saved snapshot (ADR-0042)', async ({ page, context }) => {
+  await openHome(page, context)
+
+  const row = picksRow(page, 'Fresh picks')
+  await expect(row).toBeVisible()
+  await expect(row).toContainText('Brand New Channel')
+  // Distinct from the ordinary no-stream label: this one may still get a stream
+  // on the next sync, an ordinary "no stream" pin has already been checked and
+  // genuinely has none.
+  await expect(row).toContainText('Not yet in the catalogue')
+  await expect(row).not.toContainText('No stream available')
+  await expect(row.getByRole('button', { name: 'Play Brand New Channel', exact: true })).toHaveCount(0)
 })
 
 test('a broken mark does not hide a pin, even with hide-broken turned on', async ({ page, context }) => {

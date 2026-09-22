@@ -156,6 +156,17 @@ export interface PickItem {
   channelId: string
   note?: string
   rank?: number
+  /**
+   * The channel's iptv-org identity as of the save that pinned it (ADR-0042),
+   * server-authored — never present unless the portal wrote it. Lets
+   * `PicksRow` render a pin immediately, before the backend sync has ever
+   * ingested or published the channel; absent on a document saved before this
+   * field existed, or on an item the write path could not resolve, in which
+   * case the row falls back to "pending" exactly as it always has.
+   */
+  name?: string
+  country?: string | null
+  categories?: string[]
 }
 
 export interface PickGroup {
@@ -196,6 +207,14 @@ export function decodePicks(raw: unknown): PicksDocument | null {
       const item: PickItem = { channelId: rawItem.channelId }
       if (typeof rawItem.note === 'string' && rawItem.note.length > 0) item.note = rawItem.note
       if (typeof rawItem.rank === 'number' && Number.isFinite(rawItem.rank)) item.rank = rawItem.rank
+      if (typeof rawItem.name === 'string' && rawItem.name.length > 0) item.name = rawItem.name
+      if (rawItem.country === null || typeof rawItem.country === 'string') {
+        item.country = rawItem.country
+      }
+      if (Array.isArray(rawItem.categories)) {
+        const categories = rawItem.categories.filter((c): c is string => typeof c === 'string')
+        if (categories.length > 0) item.categories = categories
+      }
       items.push(item)
     }
     groups.push({ title: rawGroup.title, items })
