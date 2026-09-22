@@ -263,7 +263,13 @@ async function fetchJwks(certsUrl: string): Promise<Map<string, CryptoKey> | nul
       }
     }
     return out.size > 0 ? out : null
-  } catch {
+  } catch (err) {
+    // TEMPORARY (diagnostic, to be reverted): every JWKS fetch failure in
+    // production returns 503 jwks-unavailable with no visible cause because
+    // this catch discarded it. Surface just the error's name/message — never
+    // the certs URL or any header — so `wrangler pages deployment tail` shows
+    // what is actually failing.
+    console.warn('[picks] jwks fetch failed:', err instanceof Error ? `${err.name}: ${err.message}` : String(err))
     return null
   } finally {
     clearTimeout(timer)
