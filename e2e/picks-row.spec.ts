@@ -58,7 +58,13 @@ function picksDocument() {
       },
       // Not in the catalogue either, but a fast-track entry (ADR-0043, WO-19) exists for it:
       // it must render as playable, not as an identity-only card.
-      { title: 'Fast-tracked', items: [{ channelId: 'fast-tracked.zz', rank: 0 }] },
+      {
+        title: 'Fast-tracked',
+        items: [
+          { channelId: 'fast-tracked.zz', rank: 0 },
+          { channelId: 'fast-tracked-no-icon.zz', rank: 1 },
+        ],
+      },
       // The author left this one empty; an empty group is the one thing that hides a row.
       { title: 'Empty on purpose', items: [] },
     ],
@@ -75,6 +81,16 @@ function fastTrackDocument() {
         country: 'ZZ',
         categories: ['news'],
         stream: { url: 'https://example.invalid/fast-tracked.m3u8', quality: '1080p' },
+        icon: 'https://icons.softarchium.com/fast-tracked.zz.webp',
+      },
+      // No icon: the backend's fetch may have failed, be still in flight, or the icon
+      // credential may not be configured at all — a fast-track entry never waits on it.
+      {
+        channelId: 'fast-tracked-no-icon.zz',
+        name: 'Iconless Fast-Tracked Channel',
+        country: 'ZZ',
+        categories: ['news'],
+        stream: { url: 'https://example.invalid/fast-tracked-no-icon.m3u8', quality: '720p' },
       },
     ],
   }
@@ -144,6 +160,27 @@ test('a fast-tracked pin renders as playable, not as an identity-only card (ADR-
   await expect(row.getByRole('button', { name: 'Play Fast-Tracked Channel', exact: true })).toBeVisible()
   await expect(row).not.toContainText('Not yet in the catalogue')
   await expect(row).not.toContainText('No stream available')
+
+  // The icon fetch (WO-19 follow-up): rendered exactly like a live-generation channel's.
+  await expect(row.getByRole('img', { name: 'Fast-Tracked Channel' })).toHaveAttribute(
+    'src',
+    'https://icons.softarchium.com/fast-tracked.zz.webp',
+  )
+})
+
+test('a fast-tracked pin with no icon yet still renders as playable, with the bundled placeholder — never blocked on it', async ({
+  page,
+  context,
+}) => {
+  await openHome(page, context)
+
+  const row = picksRow(page, 'Fast-tracked')
+  await expect(row).toBeVisible()
+  await expect(row).toContainText('Iconless Fast-Tracked Channel')
+  await expect(row.getByRole('button', { name: 'Play Iconless Fast-Tracked Channel', exact: true })).toBeVisible()
+  // No <img> at all for this card — the bundled initials placeholder instead, never a
+  // broken image and never anything pointing at an icon that does not exist.
+  await expect(row.getByRole('img', { name: 'Iconless Fast-Tracked Channel' })).toHaveCount(0)
 })
 
 test('a broken mark does not hide a pin, even with hide-broken turned on', async ({ page, context }) => {
