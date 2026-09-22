@@ -429,6 +429,7 @@ export default defineConfig({
         ],
       },
       workbox: {
+        navigateFallback: '/index.html',
         globPatterns: ['**/*.{js,css,html,ico,png,svg,woff2}'],
         // The media engine (vendor-hls) is code-split behind the /watch route,
         // so keep it out of install-time precache: a first visit should not
