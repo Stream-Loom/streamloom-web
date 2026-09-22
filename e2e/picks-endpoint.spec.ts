@@ -103,9 +103,20 @@ function makeBucket(initial: Record<string, string> = PROOF) {
     ) {
       const existing = objects.get(key)
       const mustMatch = options?.onlyIf?.etagMatches
-      if (mustMatch !== undefined && existing?.etag.replace(/^W\//, '') !== mustMatch) {
-        mutations.push(`put-refused ${key}`)
-        return null
+      if (mustMatch !== undefined) {
+        // Real R2 throws for exactly this shape (found live, 2026-09-22): it
+        // wants the bare hash, not the quoted or weak-tagged HTTP form. This
+        // check is the reason that bug could not have shipped through this
+        // fixture — the old version compared quoted-to-quoted and never
+        // noticed the value it was given was the wrong shape.
+        if (mustMatch.startsWith('"') || mustMatch.startsWith('W/')) {
+          throw new TypeError(`Conditional ETag should not be wrapped in quotes ("${mustMatch}").`)
+        }
+        const existingBare = existing?.etag.replace(/^W\//, '').replace(/^"|"$/g, '')
+        if (existingBare !== mustMatch) {
+          mutations.push(`put-refused ${key}`)
+          return null
+        }
       }
       const mustNotMatch = options?.onlyIf?.etagDoesNotMatch
       if (mustNotMatch === '*' && existing) {
