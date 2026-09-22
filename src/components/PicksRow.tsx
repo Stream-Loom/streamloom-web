@@ -94,7 +94,7 @@ function synthesizeFastTrackChannel(entry: FastTrackEntry): EnrichedChannel {
   return {
     id: entry.channelId,
     name: entry.name,
-    logo: null,
+    logo: entry.icon,
     country: entry.country,
     is_active: true,
     channel_categories: entry.categories.map((category_id) => ({ category_id })),

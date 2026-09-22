@@ -246,6 +246,14 @@ export interface FastTrackEntry {
   country: string | null
   categories: string[]
   stream: { url: string; quality: string | null }
+  /**
+   * The channel's icon, hosted the same way a live-generation channel's is (backend
+   * `icons-lib.js`, WO-19 follow-up) — null when none could be fetched (a dead or slow
+   * logo host, or the backend's icon credential unconfigured) or hasn't landed yet. A
+   * fast-track entry is never held back waiting for one; the row renders the bundled
+   * placeholder in the meantime, exactly like an ordinary channel with no logo.
+   */
+  icon: string | null
 }
 
 /**
@@ -273,6 +281,7 @@ export function decodeFastTrack(raw: unknown): FastTrackEntry[] | null {
         url: rawEntry.stream.url,
         quality: typeof rawEntry.stream.quality === 'string' ? rawEntry.stream.quality : null,
       },
+      icon: typeof rawEntry.icon === 'string' && rawEntry.icon.length > 0 ? rawEntry.icon : null,
     })
   }
   return entries
