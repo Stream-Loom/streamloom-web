@@ -290,3 +290,36 @@ Then open `/admin`, sign in through Access, and save. A pin already in the live
 generation appears on the site within about a minute; one that is not yet
 published appears at the next sync, and the portal says which is which.
 
+### Fast-track dispatch (ADR-0043, WO-19)
+
+A save that pins a genuinely new channel — one not already in the live
+generation and not already carrying a fast-track entry — dispatches a narrow
+`repository_dispatch` to `streamloom-backend`, which probes just that channel
+and, on a live verdict, makes it playable within seconds instead of waiting for
+the next scheduled sync. See `streamloom-backend/docs/adr/0043-*.md` for the
+full design; this section is only the one credential this repository needs.
+
+1. **Create a fine-grained GitHub PAT**, scoped to `Stream-Loom/streamloom-backend`
+   only, with **Contents: Read and write** (what `repository_dispatch` requires —
+   confirmed empirically, 2026-09-22). Nothing else: no Issues, no Actions, no
+   account-wide access.
+2. **Workers & Pages -> `streamloomweb` -> Settings -> Variables and Secrets**,
+   **Production only** (not Preview — `CATALOGUE_BUCKET` is Production-only too,
+   so a Preview save never reaches the dispatch code regardless): add
+   `GITHUB_DISPATCH_TOKEN`, marked **Encrypt**.
+3. **Redeploy Production after adding or changing it.** This is not specific to
+   this variable — Cloudflare Pages snapshots secrets, variables and bindings
+   **per deployment** (the R2 binding note above says the same thing) — but it
+   bit this feature for real: the token was added to an already-live deployment
+   once, and every save silently dispatched nothing (no error, no log — an
+   absent token is a deliberately quiet no-op, see `functions/api/_lib/fastTrack.ts`)
+   until the next deploy picked it up. **Adding, rotating or removing any Pages
+   secret/variable/binding always needs a fresh deployment to take effect** —
+   dashboard "Retry deployment" on the current Production deployment is enough,
+   no code change required.
+
+**Verify it actually reached the token:** pin one genuinely new channel, then
+check `streamloom-backend`'s Actions tab for a `Fast-track a pick` run within
+seconds. If none appears, the token likely hasn't reached the live deployment
+yet — redeploy and try again before assuming anything else is wrong.
+
