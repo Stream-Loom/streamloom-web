@@ -32,6 +32,7 @@
 
 import { authoriseAccessRequest, type AccessFailure } from '../_lib/accessJwt'
 import { indexAgeMinutes, isIndexStale, judgeChannel, loadIptvIndex, type IptvChannel } from '../_lib/iptvOrg'
+import { dispatchFastTrack } from '../_lib/fastTrack'
 import {
   historyKeySegment,
   LIMITS,
@@ -237,7 +238,12 @@ async function conflict(bucket: CatalogueBucket, message: string): Promise<Respo
   )
 }
 
-async function handleWrite(request: Request, bucket: CatalogueBucket): Promise<Response> {
+async function handleWrite(
+  request: Request,
+  bucket: CatalogueBucket,
+  env: unknown,
+  waitUntil: (promise: Promise<unknown>) => void,
+): Promise<Response> {
   // A cross-origin page cannot send this content type without a preflight, and the
   // preflight is refused. This is a CSRF defence, not authorisation: the JWT above
   // is what decides whether the caller may write.
@@ -341,6 +347,10 @@ async function handleWrite(request: Request, bucket: CatalogueBucket): Promise<R
   const body = JSON.stringify(document)
 
   const current = await bucket.get(PICKS_KEY)
+  // What was pinned before this save, so a fast-track dispatch (ADR-0043, WO-19) below only
+  // ever names ids this save is the first to pin — never one already sitting on the identity
+  // card from an earlier save, which would just be a redundant probe.
+  const previousIds = new Set(current ? pinnedIds((await readStored(current)) ?? { schema: PICKS_SCHEMA, groups: [] }) : [])
   const ifMatchRaw = request.headers.get('if-match')
   const ifMatch = ifMatchRaw === null ? null : stripWeak(ifMatchRaw)
 
@@ -368,6 +378,21 @@ async function handleWrite(request: Request, bucket: CatalogueBucket): Promise<R
   // records a save that did not happen; a history failure does not undo the save,
   // it is reported instead.
   const historyKey = await writeHistory(bucket, updatedAt, body)
+
+  // Fast-track (ADR-0043, WO-19): only ids this save is the first to pin, and never allowed to
+  // affect this response — `waitUntil` runs it after the response below has already gone out,
+  // and a failure is logged, never thrown. The save already succeeded; nothing past this point
+  // may un-succeed it.
+  const freshIds = pinnedIds(validated.value).filter((channelId) => !previousIds.has(channelId))
+  if (freshIds.length > 0) {
+    waitUntil(
+      dispatchFastTrack(env, freshIds).catch((err) => {
+        console.warn(
+          `[picks] fast-track dispatch failed (save already succeeded): ${err instanceof Error ? err.message : String(err)}`,
+        )
+      }),
+    )
+  }
 
   return json(
     {
@@ -425,7 +450,7 @@ export async function writeHistory(
 }
 
 export const onRequest: PagesFunction = async (context) => {
-  const { request, env } = context
+  const { request, env, waitUntil } = context
 
   // Authorisation first, before the method, the body or anything else is looked
   // at: an unauthenticated request learns nothing about this route.
@@ -451,5 +476,5 @@ export const onRequest: PagesFunction = async (context) => {
   }
 
   if (method === 'GET') return handleGet(bucket)
-  return handleWrite(request, bucket)
+  return handleWrite(request, bucket, env, waitUntil)
 }

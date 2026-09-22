@@ -92,6 +92,15 @@ export function picksUrl(base: string): string {
   return base + '/catalogue/picks.json'
 }
 
+/**
+ * The fast-track bridge (ADR-0043, WO-19): channels a save just pinned that a narrow, probed
+ * job has already found a real stream for, before the next scheduled sync publishes them for
+ * real. Generation-independent and plain JSON, same as `picks.json`, and usually empty or tiny.
+ */
+export function fastTrackUrl(base: string): string {
+  return base + '/catalogue/fast-track.json'
+}
+
 export type BulkObject = 'channels' | 'streams' | 'categories'
 
 export function bulkUrl(base: string, generation: number, name: BulkObject): string {
@@ -225,6 +234,48 @@ export function decodePicks(raw: unknown): PicksDocument | null {
     updatedAt: typeof raw.updatedAt === 'string' ? raw.updatedAt : undefined,
     groups,
   }
+}
+
+// ---- Fast-track (ADR-0043, WO-19) ----
+
+export const FAST_TRACK_SCHEMA = 1
+
+export interface FastTrackEntry {
+  channelId: string
+  name: string
+  country: string | null
+  categories: string[]
+  stream: { url: string; quality: string | null }
+}
+
+/**
+ * A fast-track document this client understands, or null — same posture as [decodePicks]: an
+ * entry it cannot make sense of is dropped, not the whole document, and an unrecognised schema
+ * is refused outright rather than guessed at.
+ */
+export function decodeFastTrack(raw: unknown): FastTrackEntry[] | null {
+  if (!isRecord(raw)) return null
+  if (raw.schema !== FAST_TRACK_SCHEMA) return null
+  if (!Array.isArray(raw.entries)) return null
+
+  const entries: FastTrackEntry[] = []
+  for (const rawEntry of raw.entries) {
+    if (!isRecord(rawEntry)) continue
+    if (typeof rawEntry.channelId !== 'string' || rawEntry.channelId.length === 0) continue
+    if (typeof rawEntry.name !== 'string' || rawEntry.name.length === 0) continue
+    if (!isRecord(rawEntry.stream) || typeof rawEntry.stream.url !== 'string' || rawEntry.stream.url.length === 0) continue
+    entries.push({
+      channelId: rawEntry.channelId,
+      name: rawEntry.name,
+      country: typeof rawEntry.country === 'string' ? rawEntry.country : null,
+      categories: Array.isArray(rawEntry.categories) ? rawEntry.categories.filter((c): c is string => typeof c === 'string') : [],
+      stream: {
+        url: rawEntry.stream.url,
+        quality: typeof rawEntry.stream.quality === 'string' ? rawEntry.stream.quality : null,
+      },
+    })
+  }
+  return entries
 }
 
 /** Items in the order the row shows them: by `rank`, then by the author's order. */

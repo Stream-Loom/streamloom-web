@@ -19,14 +19,16 @@ import {
   decodeCatalogue,
   decodeEpg,
   decodeEpgIds,
+  decodeFastTrack,
   decodePicks,
   epgIdsUrl,
   epgUrl,
+  fastTrackUrl,
   metaUrl,
   parseMeta,
   picksUrl,
 } from './r2Contract'
-import type { DecodedCatalogue, PicksDocument, R2Meta } from './r2Contract'
+import type { DecodedCatalogue, FastTrackEntry, PicksDocument, R2Meta } from './r2Contract'
 
 /** The CDN hostname the snapshot is served from. A build-time setting; never hard-coded. */
 const BASE_URL = (
@@ -48,6 +50,7 @@ export const R2_META_BUDGET_MS = 5_000
 export const R2_CATALOGUE_BUDGET_MS = 8_000
 export const R2_EPG_BUDGET_MS = 6_000
 export const R2_PICKS_BUDGET_MS = 4_000
+export const R2_FAST_TRACK_BUDGET_MS = 4_000
 
 /**
  * After a transport failure of `meta.json` or a bulk object R2 is skipped for this
@@ -151,6 +154,37 @@ export async function fetchPicksFromR2(): Promise<PicksDocument | null> {
     })
 
   return picksInFlight
+}
+
+/** Same short cache as picks.json — see [PICKS_MEMO_MS]. */
+const FAST_TRACK_MEMO_MS = 60_000
+let fastTrackMemo: { value: FastTrackEntry[] | null; until: number } | null = null
+let fastTrackInFlight: Promise<FastTrackEntry[] | null> | null = null
+
+/**
+ * `catalogue/fast-track.json` (ADR-0043, WO-19): channels a save just pinned that a probe has
+ * already found a real stream for. Null on any failure, same as [fetchPicksFromR2] and for the
+ * same reason — this object may simply not exist yet, which is the common case.
+ */
+export async function fetchFastTrackFromR2(): Promise<FastTrackEntry[] | null> {
+  if (!available()) return null
+
+  const now = Date.now()
+  if (fastTrackMemo && now < fastTrackMemo.until) return fastTrackMemo.value
+  if (fastTrackInFlight) return fastTrackInFlight
+
+  fastTrackInFlight = withBudget(R2_FAST_TRACK_BUDGET_MS, async (ctl) =>
+    decodeFastTrack(await getJson(fastTrackUrl(BASE_URL), ctl, () => {})),
+  )
+    .then((value) => {
+      fastTrackMemo = { value, until: Date.now() + FAST_TRACK_MEMO_MS }
+      return value
+    })
+    .finally(() => {
+      fastTrackInFlight = null
+    })
+
+  return fastTrackInFlight
 }
 
 /** `catalogue/meta.json`: which generation is live. One small GET. */

@@ -35,6 +35,7 @@ const ENV_VARS = { CF_ACCESS_TEAM_DOMAIN: TEAM, CF_ACCESS_AUD: AUD }
 
 const CHANNELS_URL = 'https://iptv-org.github.io/api/channels.json'
 const BLOCKLIST_URL = 'https://iptv-org.github.io/api/blocklist.json'
+const DISPATCH_URL = 'https://api.github.com/repos/Stream-Loom/streamloom-backend/dispatches'
 
 /** A small stand-in for the 31K-row upstream list, with one of each interesting flag. */
 const UPSTREAM_CHANNELS = [
@@ -164,6 +165,12 @@ interface FetchStub {
   certsStatus: number
   certsBody: string
   iptvStatus: number
+  /** Set to make a fast-track dispatch fail (ADR-0043, WO-19). */
+  dispatchStatus: number
+  /** Every dispatch body received, parsed, in call order. */
+  dispatches: { event_type: string; client_payload: { channelIds: string[] } }[]
+  /** The upstream channel list this stub serves — replace for a test that needs more rows. */
+  channels: typeof UPSTREAM_CHANNELS
   restore: () => void
 }
 
@@ -174,12 +181,15 @@ function stubFetch(keys: TestKey[]): FetchStub {
     certsStatus: 200,
     certsBody: jwks(...keys),
     iptvStatus: 200,
+    dispatchStatus: 204,
+    dispatches: [],
+    channels: UPSTREAM_CHANNELS,
     restore: () => {
       globalThis.fetch = original
     },
   }
 
-  globalThis.fetch = (async (input: RequestInfo | URL) => {
+  globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url
     stub.outbound.push(url)
     if (url === CERTS) {
@@ -189,7 +199,7 @@ function stubFetch(keys: TestKey[]): FetchStub {
       })
     }
     if (url === CHANNELS_URL) {
-      return new Response(JSON.stringify(UPSTREAM_CHANNELS), {
+      return new Response(JSON.stringify(stub.channels), {
         status: stub.iptvStatus,
         headers: { 'content-type': 'application/json' },
       })
@@ -199,6 +209,10 @@ function stubFetch(keys: TestKey[]): FetchStub {
         status: stub.iptvStatus,
         headers: { 'content-type': 'application/json' },
       })
+    }
+    if (url === DISPATCH_URL) {
+      stub.dispatches.push(JSON.parse(String(init?.body)))
+      return new Response(null, { status: stub.dispatchStatus })
     }
     // Any other outbound request is a bug worth failing on.
     return new Response('unexpected', { status: 599 })
@@ -666,6 +680,72 @@ test.describe('validation on save', () => {
     expect(res.status).toBe(503)
     expect((await res.json()).error).toBe('validation-unavailable')
     expect(mutations).toEqual([])
+  })
+})
+
+test.describe('fast-track dispatch (ADR-0043, WO-19)', () => {
+  const withToken = (extra: Record<string, string> = {}) => ({ ...ENV_VARS, GITHUB_DISPATCH_TOKEN: 'ghp_fake', ...extra })
+
+  test('a genuinely new pin is dispatched, and the save still succeeds', async () => {
+    const { bucket } = makeBucket()
+    const res = await call(picksHandler, writeRequest(await goodToken()), { ...withToken(), CATALOGUE_BUCKET: bucket })
+    expect(res.status).toBe(200)
+    expect(stub.dispatches).toEqual([{ event_type: 'fast-track-pick', client_payload: { channelIds: ['BBCNews.uk'] } }])
+  })
+
+  test('an id already pinned before this save is not dispatched again', async () => {
+    const { bucket } = makeBucket()
+    const first = await call(picksHandler, writeRequest(await goodToken()), { ...withToken(), CATALOGUE_BUCKET: bucket })
+    expect(stub.dispatches.length).toBe(1)
+    const etag = first.headers.get('etag')!
+
+    // Re-save the same pin (an edit that does not add anything new) plus one genuinely new one.
+    const second = await call(
+      picksHandler,
+      writeRequest(await goodToken(), {
+        schema: 1,
+        groups: [{ title: 'News', items: [{ channelId: 'BBCNews.uk', rank: 0 }, { channelId: 'Arte.fr', rank: 1 }] }],
+      }, { 'if-match': etag }),
+      { ...withToken(), CATALOGUE_BUCKET: bucket },
+    )
+    expect(second.status).toBe(200)
+    expect(stub.dispatches.length).toBe(2)
+    expect(stub.dispatches[1]).toEqual({ event_type: 'fast-track-pick', client_payload: { channelIds: ['Arte.fr'] } })
+  })
+
+  test('no token configured means no dispatch attempt at all', async () => {
+    const { bucket } = makeBucket()
+    const res = await call(picksHandler, writeRequest(await goodToken()), { ...ENV_VARS, CATALOGUE_BUCKET: bucket })
+    expect(res.status).toBe(200)
+    expect(stub.dispatches).toEqual([])
+    expect(stub.outbound).not.toContain(DISPATCH_URL)
+  })
+
+  test('a dispatch failure never fails the save — the write already succeeded', async () => {
+    stub.dispatchStatus = 500
+    const { bucket, objects } = makeBucket()
+    const res = await call(picksHandler, writeRequest(await goodToken()), { ...withToken(), CATALOGUE_BUCKET: bucket })
+    expect(res.status).toBe(200)
+    expect(objects.has('catalogue/picks.json')).toBe(true)
+    expect(stub.dispatches.length).toBe(1)
+  })
+
+  test('at most 10 ids are dispatched for one save, even when a bulk add pins more', async () => {
+    const ids = Array.from({ length: 12 }, (_, i) => `Extra${i}.uk`)
+    stub.channels = [
+      ...UPSTREAM_CHANNELS,
+      ...ids.map((id) => ({ id, name: id, country: 'GB', categories: ['news'], is_nsfw: false, closed: null, replaced_by: null })),
+    ]
+
+    const { bucket } = makeBucket()
+    const res = await call(
+      picksHandler,
+      writeRequest(await goodToken(), { schema: 1, groups: [{ title: 'Many', items: ids.map((channelId, rank) => ({ channelId, rank })) }] }),
+      { ...withToken(), CATALOGUE_BUCKET: bucket },
+    )
+    expect(res.status).toBe(200)
+    expect(stub.dispatches.length).toBe(1)
+    expect(stub.dispatches[0].client_payload.channelIds.length).toBe(10)
   })
 })
 
