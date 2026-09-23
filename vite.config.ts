@@ -430,7 +430,17 @@ export default defineConfig({
       },
       workbox: {
         navigateFallback: '/index.html',
-        navigateFallbackDenylist: [/^\/api\//],
+        // /api/ is excluded because it must always be live. /admin is excluded for a
+        // different reason: it sits behind Cloudflare Access, which only attaches its
+        // session cookie to a request that actually reaches Cloudflare's edge. Serving
+        // /admin's navigation from this cache (as navigateFallback otherwise would, with
+        // zero network round trip) skips that handshake entirely — the page still loads,
+        // but every fetch it makes looks unauthenticated. Found 2026-09-23: visiting the
+        // site first, then changing the address bar to /admin in the same tab, failed
+        // this way; a fresh tab with no service worker yet never had the problem. Do not
+        // re-add /admin here for offline support — the page has no offline-capable state
+        // to begin with (see src/pages/Admin.tsx), so there is nothing to gain.
+        navigateFallbackDenylist: [/^\/api\//, /^\/admin(?:$|[/?])/],
         globPatterns: ['**/*.{js,css,html,ico,png,svg,woff2}'],
         // The media engine (vendor-hls) is code-split behind the /watch route,
         // so keep it out of install-time precache: a first visit should not
