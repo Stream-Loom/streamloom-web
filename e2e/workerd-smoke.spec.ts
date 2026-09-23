@@ -1,8 +1,8 @@
 import { test, expect } from '@playwright/test'
-import { spawn, type ChildProcess } from 'node:child_process'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { createDispatchMock, DISPATCH_MOCK_URL } from './support/dispatchMock'
+import { killLoggedProcess, spawnLogged, wait, waitUntilReady, type LoggedProcess } from './support/wranglerDev'
 
 /**
  * `picks-endpoint.spec.ts` calls the Function handler directly in Node with a stubbed
@@ -34,74 +34,43 @@ const WRANGLER_URL = `http://127.0.0.1:${WRANGLER_PORT}`
 const READY_TIMEOUT_MS = 60_000
 const DISPATCH_TIMEOUT_MS = 10_000
 
-function wait(ms: number) {
-  return new Promise((resolve) => setTimeout(resolve, ms))
-}
-
-async function waitUntilReady(url: string, timeoutMs: number) {
-  const deadline = Date.now() + timeoutMs
-  let lastError: unknown
-  while (Date.now() < deadline) {
-    try {
-      const res = await fetch(url)
-      // Any response at all means the dev server is up; 404 for GET / on a Function-only
-      // fixture with no matching route is expected and fine.
-      if (res.status) return
-    } catch (err) {
-      lastError = err
-    }
-    await wait(500)
-  }
-  throw new Error(`wrangler pages dev did not become ready within ${timeoutMs}ms: ${String(lastError)}`)
-}
-
-async function waitForDispatch(dispatchMock: ReturnType<typeof createDispatchMock>, wrangler: ChildProcess | null) {
+async function waitForDispatch(dispatchMock: ReturnType<typeof createDispatchMock>, wrangler: LoggedProcess | null) {
   const deadline = Date.now() + DISPATCH_TIMEOUT_MS
   while (dispatchMock.requests.length === 0 && Date.now() < deadline) {
     await wait(100)
   }
   if (dispatchMock.requests.length === 0) {
-    const log = (wrangler as (ChildProcess & { __log?: () => string }) | null)?.__log?.() ?? ''
-    throw new Error(`dispatch never reached the mock within ${DISPATCH_TIMEOUT_MS}ms.\nwrangler output:\n${log}`)
+    throw new Error(`dispatch never reached the mock within ${DISPATCH_TIMEOUT_MS}ms.\nwrangler output:\n${wrangler?.log() ?? ''}`)
   }
 }
 
 test.describe('fast-track dispatch under real workerd (regression: 2026-09-22 silent-dispatch incident)', () => {
-  let wrangler: ChildProcess | null = null
+  let wrangler: LoggedProcess | null = null
   const dispatchMock = createDispatchMock()
 
   test.beforeAll(async () => {
     await dispatchMock.listen()
-    wrangler = spawn(
-      'npx',
-      [
-        'wrangler',
-        'pages',
-        'dev',
-        'public',
-        '--cwd',
-        FIXTURE_DIR,
-        '--ip',
-        '127.0.0.1',
-        '--port',
-        String(WRANGLER_PORT),
-        '-b',
-        'GITHUB_DISPATCH_TOKEN=smoke-test-token',
-        '-b',
-        `FAST_TRACK_DISPATCH_URL_OVERRIDE=${DISPATCH_MOCK_URL}`,
-      ],
-      { stdio: 'pipe' },
-    )
-    // Surfaced only on failure (see the log read in waitForDispatch), so a passing run stays quiet.
-    let log = ''
-    wrangler.stdout?.on('data', (d) => (log += String(d)))
-    wrangler.stderr?.on('data', (d) => (log += String(d)))
-    ;(wrangler as ChildProcess & { __log?: () => string }).__log = () => log
+    wrangler = spawnLogged('npx', [
+      'wrangler',
+      'pages',
+      'dev',
+      'public',
+      '--cwd',
+      FIXTURE_DIR,
+      '--ip',
+      '127.0.0.1',
+      '--port',
+      String(WRANGLER_PORT),
+      '-b',
+      'GITHUB_DISPATCH_TOKEN=smoke-test-token',
+      '-b',
+      `FAST_TRACK_DISPATCH_URL_OVERRIDE=${DISPATCH_MOCK_URL}`,
+    ])
     await waitUntilReady(WRANGLER_URL, READY_TIMEOUT_MS)
   })
 
   test.afterAll(async () => {
-    wrangler?.kill()
+    killLoggedProcess(wrangler)
     await dispatchMock.close()
   })
 

@@ -1,7 +1,8 @@
 import { test, expect } from '@playwright/test'
-import { spawn, type ChildProcess } from 'node:child_process'
+import { spawn } from 'node:child_process'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { killLoggedProcess, spawnLogged, waitUntilReady, type LoggedProcess } from './support/wranglerDev'
 
 /**
  * Regression test for the 2026-09-23 incident: a same-tab navigation to `/admin`, made
@@ -40,25 +41,6 @@ const WRANGLER_URL = `http://127.0.0.1:${WRANGLER_PORT}`
 const READY_TIMEOUT_MS = 60_000
 const BUILD_TIMEOUT_MS = 120_000
 
-function wait(ms: number) {
-  return new Promise((resolve) => setTimeout(resolve, ms))
-}
-
-async function waitUntilReady(url: string, timeoutMs: number) {
-  const deadline = Date.now() + timeoutMs
-  let lastError: unknown
-  while (Date.now() < deadline) {
-    try {
-      const res = await fetch(url)
-      if (res.status) return
-    } catch (err) {
-      lastError = err
-    }
-    await wait(500)
-  }
-  throw new Error(`wrangler pages dev did not become ready within ${timeoutMs}ms: ${String(lastError)}`)
-}
-
 /** Real production bundle, deliberately — the service worker only exists in this build. */
 function buildApp(): Promise<void> {
   return new Promise((resolve, reject) => {
@@ -79,7 +61,7 @@ function buildApp(): Promise<void> {
 }
 
 test.describe('/admin navigation vs the service worker (regression: 2026-09-23 Cloudflare Access bypass)', () => {
-  let wrangler: ChildProcess | null = null
+  let wrangler: LoggedProcess | null = null
 
   test.beforeAll(async () => {
     await buildApp()
@@ -89,20 +71,16 @@ test.describe('/admin navigation vs the service worker (regression: 2026-09-23 C
     // are emulated by wrangler without any real credential (no `--remote`), and neither
     // test below reaches `/api/picks`'s Access check, so no catalogue or Access mocking
     // is wired up — this suite is narrowly about the navigation/service-worker layer.
-    wrangler = spawn(
+    wrangler = spawnLogged(
       'npx',
       ['wrangler', 'pages', 'dev', 'dist', '--ip', '127.0.0.1', '--port', String(WRANGLER_PORT)],
-      { cwd: PROJECT_ROOT, stdio: 'pipe' },
+      { cwd: PROJECT_ROOT },
     )
-    let log = ''
-    wrangler.stdout?.on('data', (d) => (log += String(d)))
-    wrangler.stderr?.on('data', (d) => (log += String(d)))
-    ;(wrangler as ChildProcess & { __log?: () => string }).__log = () => log
     await waitUntilReady(`${WRANGLER_URL}/`, READY_TIMEOUT_MS)
   })
 
   test.afterAll(() => {
-    wrangler?.kill()
+    killLoggedProcess(wrangler)
   })
 
   test('a same-tab navigation to /admin, after the service worker is active, reaches the network — not the cache', async ({

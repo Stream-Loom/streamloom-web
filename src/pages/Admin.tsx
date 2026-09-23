@@ -101,7 +101,11 @@ async function tryActivateNewerServiceWorker(): Promise<boolean> {
 export function Admin() {
   const [phase, setPhase] = useState<Phase>('loading')
   const [problem, setProblem] = useState<string | null>(null)
-  /** At most one service-worker-update retry per tab (see `tryActivateNewerServiceWorker`). */
+  /**
+   * At most one service-worker-update retry per mount of this page (not per tab: a client-side
+   * route change away from `/admin` and back remounts the component and resets this — that's
+   * fine, since a fresh mount is a fresh chance, not a bypass of the guard within one load).
+   */
   const swRetryAttempted = useRef(false)
 
   const [groups, setGroups] = useState<PickGroup[]>(EMPTY_GROUPS)
@@ -190,18 +194,31 @@ export function Admin() {
       // an active service worker this is exactly the failure mode `navigateFallback`'s
       // `/admin` exclusion (see `vite.config.ts`) exists to prevent: this tab's worker may
       // simply not have picked up that fix yet. Try once to activate a newer one before
-      // giving up on this load.
+      // giving up on this load — but only when the device is actually online: a browser
+      // reporting `navigator.onLine === false` is a genuine outage/offline case that a
+      // service-worker update cannot fix, and blaming a stale worker for it would be both
+      // wrong and a needless multi-second delay before the honest message appears.
       const controller = navigator.serviceWorker?.controller
-      if (controller && !swRetryAttempted.current) {
+      if (controller && navigator.onLine !== false && !swRetryAttempted.current) {
         swRetryAttempted.current = true
         if (await tryActivateNewerServiceWorker()) {
-          window.location.reload()
+          // Only reload the page the user is still actually on. `Admin` may have unmounted
+          // (a client-side route change) while this awaited above — reloading unconditionally
+          // would force-reload whatever route replaced it instead.
+          if (window.location.pathname === '/admin') {
+            // The awaited update can be slow to actually take effect (a backgrounded or
+            // throttled tab delays it) — surface this rather than leaving the page silently
+            // stuck on "Loading the portal…" with no explanation until the reload lands.
+            setProblem('A newer version of the portal was found — reloading…')
+            setPhase('failed')
+            window.location.reload()
+          }
           return
         }
       }
       setProblem(
         controller
-          ? 'The portal could not be reached. This tab may be running an older cached version of the app — sign in at /api/picks directly (the same Cloudflare Access application), then come back and press "Try again".'
+          ? 'The portal could not be reached. This tab may be running an older cached version of the app — sign in at /api/picks directly (it needs its own Cloudflare Access sign-in, same as this page), then come back and press "Try again".'
           : 'The portal could not be reached.',
       )
       setPhase('failed')
@@ -492,18 +509,25 @@ export function Admin() {
   }
 
   if (phase === 'unauthorised') {
+    // A new tab genuinely doesn't help only when a service worker is actually serving this
+    // origin from cache (see the same check in `load`'s catch branch) — an ordinary "never
+    // signed in yet" 401 with no worker at all is ended by a plain new-tab sign-in same as it
+    // always was, so only blame the worker when one is actually present.
+    const staleWorker = Boolean(navigator.serviceWorker?.controller)
     return (
       <main className="admin">
         <h1 className="admin__heading">Picks portal</h1>
         <p className="admin__problem">
-          This browser is not signed in through Cloudflare Access, or the session has expired. A new tab
-          does not help — the service worker that caches this app controls every tab on this origin, so
-          it serves the identical unauthenticated state. Sign in at{' '}
+          This browser is not signed in through Cloudflare Access, or the session has expired.
+          {staleWorker
+            ? ' A new tab may not help — the service worker that caches this app controls every tab on this origin, so it can serve the identical unauthenticated state.'
+            : ''}{' '}
+          Sign in at{' '}
           <a href="/api/picks" target="_blank" rel="noopener noreferrer">
             /api/picks
           </a>{' '}
-          instead (the same Cloudflare Access application covers it), then come back and press
-          &quot;Try again&quot;.
+          instead — it needs its own Cloudflare Access sign-in, same as this page does, and is never
+          served from this app's cache — then come back and press &quot;Try again&quot;.
         </p>
         <button className="admin__btn" onClick={() => void load()}>
           Try again
