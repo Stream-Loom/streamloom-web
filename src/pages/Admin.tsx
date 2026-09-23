@@ -67,9 +67,46 @@ function flagLabels(flags: Flags): string[] {
 /** A channel iptv-org forbids can be seen in the picker but never added (ADR-0033 §4). */
 const isRefused = (flags: Flags): boolean => Boolean(flags.blocked) || flags.nsfw
 
+const SW_UPDATE_TIMEOUT_MS = 4_000
+
+/**
+ * Bounded, one-shot attempt to activate a newer service worker (WO-19 follow-up,
+ * 2026-09-23). Guards the race where this tab's worker registered just before a fix
+ * deployed — e.g. the one that excludes `/admin` from the cache-only navigation
+ * fallback, see `vite.config.ts` — and hasn't picked it up yet. Resolves `true` only
+ * when a new worker genuinely took control within the timeout; never used to justify an
+ * unconditional reload, since a stale worker that isn't actually stale would just repeat
+ * the same failure forever.
+ */
+async function tryActivateNewerServiceWorker(): Promise<boolean> {
+  const container = navigator.serviceWorker
+  if (!container?.controller) return false
+  const registration = await container.getRegistration().catch(() => undefined)
+  if (!registration) return false
+  const activated = new Promise<boolean>((resolve) => {
+    const onControllerChange = () => {
+      container.removeEventListener('controllerchange', onControllerChange)
+      resolve(true)
+    }
+    container.addEventListener('controllerchange', onControllerChange)
+    setTimeout(() => {
+      container.removeEventListener('controllerchange', onControllerChange)
+      resolve(false)
+    }, SW_UPDATE_TIMEOUT_MS)
+  })
+  await registration.update().catch(() => {})
+  return activated
+}
+
 export function Admin() {
   const [phase, setPhase] = useState<Phase>('loading')
   const [problem, setProblem] = useState<string | null>(null)
+  /**
+   * At most one service-worker-update retry per mount of this page (not per tab: a client-side
+   * route change away from `/admin` and back remounts the component and resets this — that's
+   * fine, since a fresh mount is a fresh chance, not a bypass of the guard within one load).
+   */
+  const swRetryAttempted = useRef(false)
 
   const [groups, setGroups] = useState<PickGroup[]>(EMPTY_GROUPS)
   const [etag, setEtag] = useState<string | null>(null)
@@ -152,7 +189,38 @@ export function Admin() {
       applyLoaded(body)
       setPhase('ready')
     } catch {
-      setProblem('The portal could not be reached.')
+      // A thrown fetch (as opposed to any HTTP status above, which all have their own
+      // branch) means the request never completed — network-level, not auth-level. Under
+      // an active service worker this is exactly the failure mode `navigateFallback`'s
+      // `/admin` exclusion (see `vite.config.ts`) exists to prevent: this tab's worker may
+      // simply not have picked up that fix yet. Try once to activate a newer one before
+      // giving up on this load — but only when the device is actually online: a browser
+      // reporting `navigator.onLine === false` is a genuine outage/offline case that a
+      // service-worker update cannot fix, and blaming a stale worker for it would be both
+      // wrong and a needless multi-second delay before the honest message appears.
+      const controller = navigator.serviceWorker?.controller
+      if (controller && navigator.onLine !== false && !swRetryAttempted.current) {
+        swRetryAttempted.current = true
+        if (await tryActivateNewerServiceWorker()) {
+          // Only reload the page the user is still actually on. `Admin` may have unmounted
+          // (a client-side route change) while this awaited above — reloading unconditionally
+          // would force-reload whatever route replaced it instead.
+          if (window.location.pathname === '/admin') {
+            // The awaited update can be slow to actually take effect (a backgrounded or
+            // throttled tab delays it) — surface this rather than leaving the page silently
+            // stuck on "Loading the portal…" with no explanation until the reload lands.
+            setProblem('A newer version of the portal was found — reloading…')
+            setPhase('failed')
+            window.location.reload()
+          }
+          return
+        }
+      }
+      setProblem(
+        controller
+          ? 'The portal could not be reached. This tab may be running an older cached version of the app — sign in at /api/picks directly (it needs its own Cloudflare Access sign-in, same as this page), then come back and press "Try again".'
+          : 'The portal could not be reached.',
+      )
       setPhase('failed')
     }
   }, [applyLoaded])
@@ -441,12 +509,25 @@ export function Admin() {
   }
 
   if (phase === 'unauthorised') {
+    // A new tab genuinely doesn't help only when a service worker is actually serving this
+    // origin from cache (see the same check in `load`'s catch branch) — an ordinary "never
+    // signed in yet" 401 with no worker at all is ended by a plain new-tab sign-in same as it
+    // always was, so only blame the worker when one is actually present.
+    const staleWorker = Boolean(navigator.serviceWorker?.controller)
     return (
       <main className="admin">
         <h1 className="admin__heading">Picks portal</h1>
         <p className="admin__problem">
-          This browser is not signed in through Cloudflare Access, or the session has expired. Open this
-          page again in a new tab to sign in, then reload.
+          This browser is not signed in through Cloudflare Access, or the session has expired.
+          {staleWorker
+            ? ' A new tab may not help — the service worker that caches this app controls every tab on this origin, so it can serve the identical unauthenticated state.'
+            : ''}{' '}
+          Sign in at{' '}
+          <a href="/api/picks" target="_blank" rel="noopener noreferrer">
+            /api/picks
+          </a>{' '}
+          instead — it needs its own Cloudflare Access sign-in, same as this page does, and is never
+          served from this app's cache — then come back and press &quot;Try again&quot;.
         </p>
         <button className="admin__btn" onClick={() => void load()}>
           Try again

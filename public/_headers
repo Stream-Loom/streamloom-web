@@ -12,6 +12,14 @@
 /manifest.webmanifest
   Cache-Control: public, max-age=86400
 
+# The service worker script itself must never sit in the browser's HTTP cache: a fix that
+# changes its routing (like excluding /admin from the cache-only navigation fallback below,
+# see vite.config.ts) needs the browser's next update check to actually fetch the new bytes.
+# Modern browsers already bypass the HTTP cache for this file by default (updateViaCache:
+# "imports"), so this is belt-and-braces, not the only thing preventing a stale worker.
+/sw.js
+  Cache-Control: no-cache
+
 # The picks portal is unlisted (ADR-0033 §5): nothing links to it and it is in no
 # sitemap, so the only ways a crawler finds it are a referrer leak or a guess.
 # `noindex` keeps it out of an index if one does, and `no-store` keeps the
