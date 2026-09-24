@@ -405,11 +405,44 @@ function streamProxyPlugin(): Plugin {
   }
 }
 
+/**
+ * Starts the catalogue pointer (`meta.json`, ADR-0030) downloading with the HTML.
+ *
+ * The client can only ask for it once its JavaScript has loaded and run, and every
+ * catalogue object waits on it, so on a first visit it sat alone on the critical
+ * path (measured ~0.5 s after the bundle). A preload lets it arrive while the bundle
+ * downloads. Same URL, mode and credentials as the `fetch` in `src/api/r2.ts`, so the
+ * browser hands that fetch the preloaded response instead of asking again.
+ */
+function cataloguePreloadPlugin(): Plugin {
+  let base = ''
+  return {
+    name: 'catalogue-preload',
+    configResolved(config) {
+      base = String(config.env.VITE_CATALOGUE_R2_BASE_URL ?? '').trim().replace(/\/+$/, '')
+    },
+    transformIndexHtml() {
+      let origin: string
+      try {
+        origin = new URL(base).origin
+      } catch {
+        return []
+      }
+      if (!/^https?:\/\//i.test(base)) return []
+      return [
+        { tag: 'link', attrs: { rel: 'preconnect', href: origin, crossorigin: 'anonymous' }, injectTo: 'head' },
+        { tag: 'link', attrs: { rel: 'preload', as: 'fetch', href: `${base}/catalogue/meta.json`, crossorigin: 'anonymous' }, injectTo: 'head' },
+      ]
+    },
+  }
+}
+
 export default defineConfig({
   envPrefix: ['VITE_', 'UPSTASH_'],
   plugins: [
     react(),
     streamProxyPlugin(),
+    cataloguePreloadPlugin(),
     VitePWA({
       registerType: 'autoUpdate',
       includeAssets: ['favicon.ico', 'icons/*.png'],
@@ -442,10 +475,11 @@ export default defineConfig({
         // to begin with (see src/pages/Admin.tsx), so there is nothing to gain.
         navigateFallbackDenylist: [/^\/api\//, /^\/admin(?:$|[/?])/],
         globPatterns: ['**/*.{js,css,html,ico,png,svg,woff2}'],
-        // The media engine (vendor-hls) is code-split behind the /watch route,
-        // so keep it out of install-time precache: a first visit should not
-        // download ~575 kB it may never use. The runtime rule below caches it
-        // the first time playback actually needs it.
+        // The media engine (vendor-hls) is code-split behind the /watch route and
+        // kept out of install-time precache, so installing the worker never blocks
+        // on it. App.tsx prefetches it once a catalogue is on screen and the page is
+        // idle (not under Save-Data or on 2G), because the first channel opened
+        // otherwise waited on it; the runtime rule below caches it from then on.
         globIgnores: ['**/vendor-hls-*.js'],
         runtimeCaching: [
           {

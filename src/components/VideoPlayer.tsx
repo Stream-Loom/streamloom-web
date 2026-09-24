@@ -24,6 +24,7 @@ import {
   recordStreamFailure,
 } from '../util/streamFailure'
 import type { FailureClass } from '../util/streamFailure'
+import { rememberBandwidth, startingBandwidth } from '../util/bandwidth'
 import './VideoPlayer.css'
 
 interface Props {
@@ -46,6 +47,24 @@ function getCurrentProgram(programs: EpgProgram[], nowMs: number): EpgProgram | 
     return nowMs >= start && nowMs < end
   })
 }
+
+/*
+ * Watchdogs judge progress, not elapsed time. A load that receives no media bytes for
+ * the idle window is dead and the next attempt is tried, exactly as fast as before; a
+ * load whose bytes are still arriving on a slow link is left to finish, up to the cap,
+ * instead of being torn down and restarted from zero on another path.
+ */
+/** Before the first frame: longest without a media byte before trying the next attempt. */
+const START_IDLE_MS = 7000
+/**
+ * Before the first frame: longest a slow but moving load may take. Just past hls.js's
+ * own fragLoadingTimeOut (12 s, below), beyond which it restarts the fragment anyway.
+ */
+const START_CAP_MS = 13000
+/** After playback: longest a stall may go without a media byte. */
+const STALL_IDLE_MS = 8000
+/** After playback: longest a stall may last while bytes trickle in. */
+const STALL_CAP_MS = 20000
 
 /** Why each candidate of one channel failed, so exhaustion can be judged as a whole. */
 interface FailureEvidence {
@@ -135,9 +154,25 @@ export function VideoPlayer({ channel, allChannels, returnTo = '/' }: Props) {
   const stallTimer = useRef<number | null>(null)
   const mediaRecoveryAttempts = useRef(0)
   const hasPlayedSuccessfully = useRef(false)
+  /** When the last media byte arrived; playlist refreshes do not count. */
+  const lastMediaByteAt = useRef(0)
   const switchChannelCleanlyRef = useRef<(target: EnrichedChannel) => void>(() => {})
   const failoverToNextAttemptRef = useRef<(cause: FailureClass) => void>(() => {})
   const failureEvidenceRef = useRef<FailureEvidence | null>(null)
+
+  /** Tears down the engine, keeping its bandwidth measurement for the next start. */
+  const destroyHls = useCallback(() => {
+    const hls = hlsRef.current
+    if (!hls) return
+    // Only while it is actually playing: a teardown after a stall measured one slow
+    // origin, not this device's connection.
+    const v = videoRef.current
+    if (hasPlayedSuccessfully.current && v && !v.paused && v.readyState >= 3) rememberBandwidth(hls.bandwidthEstimate)
+    hls.stopLoad()
+    hls.detachMedia()
+    hls.destroy()
+    hlsRef.current = null
+  }, [])
 
   if (channel.id !== prevChannelId) {
     setPrevChannelId(channel.id)
@@ -469,12 +504,7 @@ export function VideoPlayer({ channel, allChannels, returnTo = '/' }: Props) {
       stallTimer.current = null
     }
     // Immediately stop current HLS loader and media buffer to prevent lockup
-    if (hlsRef.current) {
-      hlsRef.current.stopLoad()
-      hlsRef.current.detachMedia()
-      hlsRef.current.destroy()
-      hlsRef.current = null
-    }
+    destroyHls()
     const video = videoRef.current
     if (video) {
       video.onloadedmetadata = null
@@ -502,7 +532,7 @@ export function VideoPlayer({ channel, allChannels, returnTo = '/' }: Props) {
         returnTo,
       },
     })
-  }, [returnTo, navigate])
+  }, [returnTo, navigate, destroyHls])
 
   const switchChannelCleanly = useCallback((target: EnrichedChannel) => {
     cancelCountdown()
@@ -524,12 +554,7 @@ export function VideoPlayer({ channel, allChannels, returnTo = '/' }: Props) {
       window.clearTimeout(connectionTimeoutTimer.current)
       connectionTimeoutTimer.current = null
     }
-    if (hlsRef.current) {
-      hlsRef.current.stopLoad()
-      hlsRef.current.detachMedia()
-      hlsRef.current.destroy()
-      hlsRef.current = null
-    }
+    destroyHls()
     const video = videoRef.current
     if (video) {
       video.onloadedmetadata = null
@@ -539,7 +564,7 @@ export function VideoPlayer({ channel, allChannels, returnTo = '/' }: Props) {
     sessionStorage.setItem('sl_last_viewed', channel.id)
     ;(document.activeElement as HTMLElement)?.blur?.()
     navigate(returnTo, { state: { targetChannelId: channel.id } })
-  }, [cancelCountdown, channel.id, returnTo, navigate])
+  }, [cancelCountdown, channel.id, returnTo, navigate, destroyHls])
 
   // The user's own choice to drop this channel from every list; undone in Settings.
   const handleHideChannel = useCallback(() => {
@@ -816,12 +841,21 @@ export function VideoPlayer({ channel, allChannels, returnTo = '/' }: Props) {
       if (!isDisposed) setIsSlowConnecting(true)
     }, 4500)
 
-    // Failover watchdog timer: if stream not parsed / buffered in 7s, trigger failover
-    failoverTimer.current = window.setTimeout(() => {
-      if (!isDisposed) {
-        failoverToNextAttemptRef.current('inconclusive')
+    // Failover watchdog: re-checks until media stops arriving or the cap is reached.
+    const attemptStart = performance.now()
+    lastMediaByteAt.current = attemptStart
+    const checkStart = () => {
+      if (isDisposed) return
+      const now = performance.now()
+      const idle = now - lastMediaByteAt.current
+      const left = START_CAP_MS - (now - attemptStart)
+      if (idle < START_IDLE_MS && left > 0) {
+        failoverTimer.current = window.setTimeout(checkStart, Math.min(START_IDLE_MS - idle, left))
+        return
       }
-    }, 7000)
+      failoverToNextAttemptRef.current('inconclusive')
+    }
+    failoverTimer.current = window.setTimeout(checkStart, START_IDLE_MS)
 
     const onPlaybackSuccess = () => {
       if (isDisposed) return
@@ -866,12 +900,7 @@ export function VideoPlayer({ channel, allChannels, returnTo = '/' }: Props) {
     }
 
     // Stop and cleanup previous HLS instance
-    if (hlsRef.current) {
-      hlsRef.current.stopLoad()
-      hlsRef.current.detachMedia()
-      hlsRef.current.destroy()
-      hlsRef.current = null
-    }
+    destroyHls()
 
     const syncNativeTextTracks = () => {
       if (isDisposed || !video.textTracks) return
@@ -924,8 +953,9 @@ export function VideoPlayer({ channel, allChannels, returnTo = '/' }: Props) {
         liveMaxLatencyDurationCount: 4,
         startFragPrefetch: true,
         startLevel: -1,
-        abrEwmaDefaultEstimate: 5_000_000,
-        // Start on the highest level so a good connection never ramps up from 360p.
+        // Start on the level this device's last measured speed sustains, so a good
+        // connection never ramps up from 360p and a slow one never starts on 1080p.
+        abrEwmaDefaultEstimate: startingBandwidth(),
         testBandwidth: false,
         manifestLoadingTimeOut: 10000,
         manifestLoadingMaxRetry: 2,
@@ -937,6 +967,15 @@ export function VideoPlayer({ channel, allChannels, returnTo = '/' }: Props) {
         renderTextTracksNatively: true,
         enableCEA708Captions: true,
         xhrSetup: (xhr: XMLHttpRequest) => {
+          // Media bytes (not playlists, which keep refreshing on a stuck live stream,
+          // nor error bodies) are what tells the watchdogs a slow load is still alive.
+          // hls.js loads fragments as arraybuffer and playlists as text, whatever
+          // Content-Type the origin sends.
+          xhr.addEventListener('progress', () => {
+            if (xhr.responseType === 'arraybuffer' && xhr.status >= 200 && xhr.status < 300) {
+              lastMediaByteAt.current = performance.now()
+            }
+          })
           xhr.addEventListener('readystatechange', () => {
             // Guard against HTML payloads (e.g. SPA index.html returned by unconfigured proxy)
             if (xhr.readyState === 4 && xhr.status === 200) {
@@ -1081,6 +1120,17 @@ export function VideoPlayer({ channel, allChannels, returnTo = '/' }: Props) {
       hlsRef.current = hls
     } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
       video.src = targetUrl
+      // Native HLS (Safari) has no loader hook. Its progress event can fire for playlist
+      // polling too, so only a buffer that actually grew counts as media arriving.
+      let bufferedEnd = 0
+      video.onprogress = () => {
+        const b = video.buffered
+        const end = b.length > 0 ? b.end(b.length - 1) : 0
+        if (end > bufferedEnd) {
+          bufferedEnd = end
+          lastMediaByteAt.current = performance.now()
+        }
+      }
       video.onloadedmetadata = () => {
         syncNativeTextTracks()
         video.play().catch(() => setIsPlaying(false))
@@ -1119,19 +1169,15 @@ export function VideoPlayer({ channel, allChannels, returnTo = '/' }: Props) {
         window.clearTimeout(stallTimer.current)
         stallTimer.current = null
       }
-      if (hlsRef.current) {
-        hlsRef.current.stopLoad()
-        hlsRef.current.detachMedia()
-        hlsRef.current.destroy()
-        hlsRef.current = null
-      }
+      destroyHls()
       video.textTracks?.removeEventListener?.('addtrack', syncNativeTextTracks)
       video.textTracks?.removeEventListener?.('change', syncNativeTextTracks)
       video.onloadedmetadata = null
       video.onplaying = null
       video.onerror = null
+      video.onprogress = null
     }
-  }, [channel.id, activeStreamIdx, isProxied, retryNonce, channelStreams, channel.stream, addRecent])
+  }, [channel.id, activeStreamIdx, isProxied, retryNonce, channelStreams, channel.stream, addRecent, destroyHls])
 
   // Keybindings: attached once with stable ref to guarantee zero dropped key events
   const onKeyRef = useRef<(e: KeyboardEvent) => void>(() => {})
@@ -1257,10 +1303,19 @@ export function VideoPlayer({ channel, allChannels, returnTo = '/' }: Props) {
         onWaiting={() => {
           setIsBuffering(true)
           if (hasPlayedSuccessfully.current && !stallTimer.current) {
-            stallTimer.current = window.setTimeout(() => {
+            const since = performance.now()
+            const checkStall = () => {
+              const now = performance.now()
+              const idle = now - lastMediaByteAt.current
+              const left = STALL_CAP_MS - (now - since)
+              if (idle < STALL_IDLE_MS && left > 0) {
+                stallTimer.current = window.setTimeout(checkStall, Math.min(STALL_IDLE_MS - idle, left))
+                return
+              }
               stallTimer.current = null
               failoverToNextAttemptRef.current('inconclusive')
-            }, 8000)
+            }
+            stallTimer.current = window.setTimeout(checkStall, STALL_IDLE_MS)
           }
         }}
         onPlaying={() => {

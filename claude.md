@@ -118,7 +118,7 @@ effect on production until it is added in the dashboard as well, and adding
 
 ### 2. Multi-Stream Candidate Shuffling & Caching
 - Channels in Supabase often provide multiple stream candidates (`channel.streams`).
-- `VideoPlayer.tsx` features a **6.5s watchdog timer**:
+- `VideoPlayer.tsx` features a **progress-aware watchdog** (`START_IDLE_MS`, `START_CAP_MS`, `STALL_IDLE_MS`, `STALL_CAP_MS`): an attempt that receives no media bytes for the idle window fails over; one whose bytes are still arriving on a slow link is left to finish, up to the cap. Media bytes are fragment (`arraybuffer`) XHR progress with a 2xx status, or native-HLS buffer growth, never playlist refreshes or error bodies, so a stuck live stream still fails over as fast as before.
   - If a stream stalls or errors, it tries edge proxy (if direct) or advances to the next stream candidate.
   - When a candidate works (`MANIFEST_PARSED` / `FRAG_BUFFERED`), it is cached via `cacheWorkingStream(channel.id, url, isProxied)` in `sl_working_streams_v1` (7-day TTL).
   - `enrichChannels` in `useChannels.ts` unshifts cached working streams to index 0 so subsequent visits load instantly.
@@ -133,7 +133,7 @@ effect on production until it is added in the dashboard as well, and adding
 
 ### 2c. Broken-Stream Marks (the hide/skip rule)
 - **Rule**: a channel is hidden or skipped only when the user explicitly turns that setting on (`sl_hide_broken`, `sl_auto_skip`; both default off), and a failure caused by the user's own network must never change what is shown.
-- `VideoPlayer.tsx` classifies every failed attempt (`src/util/streamFailure.ts`): `stream` (origin 4xx/5xx except 408/425/429, manifest/level/frag parse, codec, native decode/unsupported), `network` (no response), `inconclusive` (timeouts, the 7s/8s watchdogs, aborts, unknown).
+- `VideoPlayer.tsx` classifies every failed attempt (`src/util/streamFailure.ts`): `stream` (origin 4xx/5xx except 408/425/429, manifest/level/frag parse, codec, native decode/unsupported), `network` (no response), `inconclusive` (timeouts, the watchdogs, aborts, unknown).
 - On exhaustion, `recordStreamFailure()` calls `markStreamBroken` only when `navigator.onLine`, a same-origin probe (`/favicon.svg?probe=`) succeeds, and **every** candidate's last attempt was `stream`. Auto-skip also requires the probe to pass.
 - Never call `markStreamBroken` from a player error path directly. Marks written before this rule are purged once (`sl_broken_reset_v1`).
 - Hangs are never marked, so the user can hide a channel themselves (player HUD 🚫, slow-connecting and error overlays). `sl_hidden_channels_v1` holds their choice: no TTL, applies regardless of hide-broken, untouched by the mark purge and cache reset, undone per channel or all at once in Settings → Hidden Channels. It filters `channels` in `useChannels` and the playlists in `Watch.tsx`.
@@ -141,7 +141,9 @@ effect on production until it is added in the dashboard as well, and adding
 
 ### 3. Startup & Channel-Switch Latency
 - HLS runs with `enableWorker: false` — worker spawn costs 100–300 ms on low-end TV browsers while the parse work is negligible.
-- `testBandwidth: false` plus `startFragPrefetch` and `abrEwmaDefaultEstimate: 5 Mbps` avoid an ABR ramp-up from low quality on fast connections.
+- `testBandwidth: false` plus `startFragPrefetch`, with `abrEwmaDefaultEstimate` seeded from the speed hls.js measured last time on this device and network (`src/util/bandwidth.ts`, `sl_bandwidth_v1`; saved only from a teardown while playing). A fast link starts on its best level with no ramp-up; a slow one never starts on a level it cannot sustain.
+- `App.tsx` prefetches the player chunk (hls.js) once a catalogue is on screen and the page is idle (skipped under Save-Data and on 2G), so the first channel opened does not wait on it.
+- `vite.config.ts` injects a preload of `catalogue/meta.json` into `index.html`, so the catalogue pointer arrives while the bundle downloads rather than after it runs.
 - `VideoPlayer.tsx` warms the next channel's resolved manifest with a `priority: 'low'` fetch 1.5 s after playback starts, so the browser and edge cache are primed before the user switches.
 
 ### 4. Catalogue Read Path & Read Budget

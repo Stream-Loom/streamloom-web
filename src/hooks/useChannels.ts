@@ -451,6 +451,21 @@ function startRefreshLoop() {
 
 startRefreshLoop()
 
+/** Runs `fn` once, as soon as a catalogue is held (now, if one already is). */
+export function afterCatalogue(fn: () => void): () => void {
+  if (_channels) {
+    fn()
+    return () => {}
+  }
+  const check = () => {
+    if (!_channels) return
+    _listeners.delete(check)
+    fn()
+  }
+  _listeners.add(check)
+  return () => { _listeners.delete(check) }
+}
+
 const NO_CHANNELS: EnrichedChannel[] = []
 
 export function useChannels(): UseChannelsResult {

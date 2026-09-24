@@ -93,7 +93,7 @@ StreamLoom Web is the browser-native Progressive Web App (PWA) companion to the 
 
 ### Multi-Stream Candidate Shuffling & Caching
 - Many channels have multiple broadcast endpoints in `channel.streams`.
-- `VideoPlayer.tsx` maintains a **6.5-second failover watchdog**:
+- `VideoPlayer.tsx` maintains a **progress-aware failover watchdog** (7 s without media bytes; see `claude.md` for the exact rules):
   1. Try direct connection (if HTTPS) or proxy (if HTTP mixed content).
   2. If direct stalls or errors, failover to edge proxy.
   3. If edge proxy stalls or errors, advance to candidate 2, candidate 3, etc.
