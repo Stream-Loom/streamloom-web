@@ -29,8 +29,9 @@
  * this route accepts at all — see that module's doc comment for why.
  */
 
-import { authoriseAccessRequest, type AccessFailure } from '../_lib/accessJwt'
-import { bindBucket, type CatalogueBucket, type R2Object } from '../_lib/catalogueBucket'
+import { authoriseAccessRequest } from '../_lib/accessJwt'
+import { bindBucket, type CatalogueBucket } from '../_lib/catalogueBucket'
+import { bareEtag, json, readStoredJson, refuse, stripWeak } from '../_lib/httpJson'
 import {
   assignIds,
   LIMITS,
@@ -46,44 +47,12 @@ const CUSTOM_CHANNELS_CACHE_CONTROL = 'public, max-age=60, stale-while-revalidat
 /** Same proof-of-bucket check `/api/picks` makes, and for the same reason (see that module). */
 const BUCKET_PROOF_KEY = 'catalogue/meta.json'
 
-const json = (body: unknown, status: number, headers: Record<string, string> = {}): Response =>
-  new Response(JSON.stringify(body), {
-    status,
-    headers: {
-      'Content-Type': 'application/json; charset=utf-8',
-      'Cache-Control': 'no-store',
-      'X-Content-Type-Options': 'nosniff',
-      ...headers,
-    },
-  })
-
-/** Generic by design; see the same function in ./index.ts. The reason goes to the log. */
-function refuse(failure: AccessFailure): Response {
-  console.warn(`[custom-channels] request refused: ${failure.status} ${failure.reason}`)
-  if (failure.status === 503) return json({ error: 'unavailable' }, 503)
-  return json({ error: 'unauthorised' }, failure.status)
-}
-
-const stripWeak = (etag: string): string => etag.replace(/^W\//, '').trim()
-const bareEtag = (etag: string): string => stripWeak(etag).replace(/^"|"$/g, '')
-
-/** The stored document, or null when the object is absent or unreadable. */
-async function readStored(object: R2Object): Promise<CustomChannelsDocument | null> {
-  try {
-    const value = (await object.json()) as unknown
-    if (typeof value !== 'object' || value === null || Array.isArray(value)) return null
-    return value as CustomChannelsDocument
-  } catch {
-    return null
-  }
-}
-
 async function handleGet(bucket: CatalogueBucket): Promise<Response> {
   const object = await bucket.get(CUSTOM_CHANNELS_KEY)
   if (!object) {
     return json({ channels: [], etag: null, limits: LIMITS }, 200)
   }
-  const doc = await readStored(object)
+  const doc = await readStoredJson<CustomChannelsDocument>(object)
   return json({ channels: doc?.channels ?? [], etag: object.httpEtag, limits: LIMITS }, 200, {
     ETag: object.httpEtag,
   })
@@ -97,7 +66,7 @@ async function conflict(bucket: CatalogueBucket, message: string): Promise<Respo
       error: 'conflict',
       detail: message,
       etag: current?.httpEtag ?? null,
-      channels: current ? ((await readStored(current))?.channels ?? []) : [],
+      channels: current ? ((await readStoredJson<CustomChannelsDocument>(current))?.channels ?? []) : [],
     },
     412,
   )
@@ -129,9 +98,18 @@ async function handleWrite(request: Request, bucket: CatalogueBucket): Promise<R
     return json({ error: 'invalid-json' }, 400)
   }
 
+  const current = await bucket.get(CUSTOM_CHANNELS_KEY)
+  const currentDoc = current ? await readStoredJson<CustomChannelsDocument>(current) : null
+  const existingIds = new Set((currentDoc?.channels ?? []).map((c) => c.id))
+
+  const validated = validateCustomChannelsInput(parsed, existingIds)
+  if (!validated.ok) return json({ error: 'invalid-custom-channels', errors: validated.errors }, 400)
+
   // Prove the binding points at the catalogue bucket before writing into it — same defence
-  // `/api/picks` applies, and for the same reason: a binding aimed at `channel-icons` or an
-  // empty bucket must not be seeded with a custom-channels object nothing reads.
+  // `/api/picks` applies, checked at the same point in the sequence (validate the body first,
+  // so a malformed request gets the 400 it deserves rather than a 503 that misdirects the
+  // admin toward the bucket configuration): a binding aimed at `channel-icons` or an empty
+  // bucket must not be seeded with a custom-channels object nothing reads.
   let proof: { key: string } | null
   try {
     proof = await bucket.head(BUCKET_PROOF_KEY)
@@ -149,13 +127,6 @@ async function handleWrite(request: Request, bucket: CatalogueBucket): Promise<R
       503,
     )
   }
-
-  const current = await bucket.get(CUSTOM_CHANNELS_KEY)
-  const currentDoc = current ? await readStored(current) : null
-  const existingIds = new Set((currentDoc?.channels ?? []).map((c) => c.id))
-
-  const validated = validateCustomChannelsInput(parsed, existingIds)
-  if (!validated.ok) return json({ error: 'invalid-custom-channels', errors: validated.errors }, 400)
 
   const ifMatchRaw = request.headers.get('if-match')
   const ifMatch = ifMatchRaw === null ? null : stripWeak(ifMatchRaw)
@@ -196,7 +167,7 @@ export const onRequest: PagesFunction = async (context) => {
   const { request, env } = context
 
   const auth = await authoriseAccessRequest(request, env)
-  if (!auth.ok) return refuse(auth)
+  if (!auth.ok) return refuse('custom-channels', auth)
 
   const method = request.method.toUpperCase()
   if (method !== 'GET' && method !== 'PUT' && method !== 'POST') {

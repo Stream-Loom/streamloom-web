@@ -193,6 +193,18 @@ test.describe('configuration and bucket proof', () => {
     expect(res.status).toBe(200)
     expect((await res.json()).channels).toEqual([])
   })
+
+  test('a malformed body against the wrong bucket is still 400, not 503: validation runs first', async () => {
+    const { bucket, mutations } = makeBucket({ 'icons/x.webp': 'not-json' })
+    const res = await call(
+      customChannelsHandler,
+      writeRequest(await goodToken(), { schema: 1, channels: [{ name: 'A' }] }),
+      { ...ENV_VARS, CATALOGUE_BUCKET: bucket },
+    )
+    expect(res.status).toBe(400)
+    expect((await res.json()).error).toBe('invalid-custom-channels')
+    expect(mutations).toEqual([])
+  })
 })
 
 test.describe('validation on save', () => {
@@ -220,7 +232,9 @@ test.describe('validation on save', () => {
   }
 
   test('an oversized body is refused with 413 before it is parsed', async () => {
-    const huge = JSON.stringify({ schema: 1, channels: [{ name: 'A'.repeat(40_000), streamUrl: 'https://x.test/a.m3u8' }] })
+    // Past LIMITS.bodyBytes (256 KiB) — comfortably past, so the check trips regardless of
+    // JSON framing overhead, and before schema validation ever sees the (also invalid) name.
+    const huge = JSON.stringify({ schema: 1, channels: [{ name: 'A'.repeat(300_000), streamUrl: 'https://x.test/a.m3u8' }] })
     const { bucket, mutations } = makeBucket()
     const res = await call(customChannelsHandler, writeRequest(await goodToken(), huge), { ...ENV_VARS, CATALOGUE_BUCKET: bucket })
     expect(res.status).toBe(413)

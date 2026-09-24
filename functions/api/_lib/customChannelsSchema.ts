@@ -25,9 +25,19 @@ import { hasForbiddenChar } from './picksSchema'
 
 export const CUSTOM_CHANNELS_SCHEMA = 1
 
-/** Ceilings. `channels` mirrors `MAX_CUSTOM_CHANNELS` in `sync-worker/custom-channels.js`. */
+/**
+ * Ceilings. `channels` mirrors `MAX_CUSTOM_CHANNELS` in `sync-worker/custom-channels.js`.
+ *
+ * `bodyBytes` has to hold `channels` entries anywhere near their own individual maxima —
+ * `channels * (nameChars + 2*urlChars + countryChars + a ~150-byte id/JSON-overhead margin)`
+ * is ~213 KB, and a real admin's stream/icon URLs (signed CDN URLs routinely run several
+ * hundred characters) can approach `urlChars` well before `channels` is anywhere near 50.
+ * 32 KB — copied from `/api/picks`'s own limit without re-deriving it for this shape, whose
+ * per-entry URLs are far larger than a picks item's `note` — left every save failing on a
+ * generic "too large" error once URLs stopped being tiny, with nothing to say which entry.
+ */
 export const LIMITS = {
-  bodyBytes: 32 * 1024,
+  bodyBytes: 256 * 1024,
   channels: 50,
   nameChars: 100,
   urlChars: 2000,
