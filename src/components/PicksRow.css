@@ -42,6 +42,11 @@
   border: 1px dashed var(--border);
 }
 
+/* Pushed to the header's end, same ‹ › controls every other row has. */
+.picks-row__controls {
+  margin-left: auto;
+}
+
 .picks-row__track {
   display: flex;
   gap: var(--space-md);

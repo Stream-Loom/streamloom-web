@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { ChannelCard } from './ChannelCard'
 import { fetchFastTrackFromR2, fetchPicksFromR2 } from '../api/r2'
 import { orderPickItems } from '../api/r2Contract'
@@ -197,51 +197,73 @@ export function PicksRow({ channels, onWatch, filter }: Props) {
 
   return (
     <>
-      {groups.map((group) => {
-        // Keyboard next/previous should not land on a pin that cannot play.
-        const playlist = group.picks
-          .filter((pick) => pick.channel.stream)
-          .map((pick) => pick.channel.id)
-
-        return (
-          <section className="picks-row fade-up" key={group.title} aria-label={`Picks: ${group.title}`}>
-            <div className="picks-row__header">
-              <h2 className="picks-row__title">
-                <span aria-hidden="true">★ </span>
-                {group.title}
-              </h2>
-              <span className="picks-row__count">{group.picks.length}</span>
-              {group.pendingCount > 0 && (
-                <span className="picks-row__pending" title="Pinned, but not in the published catalogue yet">
-                  {group.pendingCount} pending
-                </span>
-              )}
-            </div>
-
-            <div className="picks-row__track">
-              {group.picks.map(({ channel, note, pending }) => (
-                <div className="picks-row__item" key={channel.id}>
-                  <ChannelCard
-                    channel={channel}
-                    onWatch={onWatch}
-                    playlist={playlist.length > 1 ? playlist : undefined}
-                  />
-                  {note && (
-                    <p className="picks-row__note" title={note}>
-                      {note}
-                    </p>
-                  )}
-                  {!channel.stream && (
-                    <p className="picks-row__unavailable">
-                      {pending ? 'Not yet in the catalogue' : 'No stream available'}
-                    </p>
-                  )}
-                </div>
-              ))}
-            </div>
-          </section>
-        )
-      })}
+      {groups.map((group) => (
+        <PicksGroupSection key={group.title} group={group} onWatch={onWatch} />
+      ))}
     </>
+  )
+}
+
+/**
+ * One picks group's own row, with the same ‹ › scroll controls every other
+ * row on Home has (`.category-row__arrow`, reused as-is rather than
+ * reinvented). Split out from `PicksRow` because each group needs its own
+ * scroll container ref, which a `.map()` callback cannot give a hook.
+ */
+function PicksGroupSection({ group, onWatch }: { group: ResolvedGroup; onWatch?: (channelId: string) => void }) {
+  const trackRef = useRef<HTMLDivElement>(null)
+
+  function scroll(dir: 'left' | 'right') {
+    trackRef.current?.scrollBy({ left: dir === 'right' ? 560 : -560, behavior: 'smooth' })
+  }
+
+  // Keyboard next/previous should not land on a pin that cannot play.
+  const playlist = group.picks.filter((pick) => pick.channel.stream).map((pick) => pick.channel.id)
+
+  return (
+    <section className="picks-row fade-up" aria-label={`Picks: ${group.title}`}>
+      <div className="picks-row__header">
+        <h2 className="picks-row__title">
+          <span aria-hidden="true">★ </span>
+          {group.title}
+        </h2>
+        <span className="picks-row__count">{group.picks.length}</span>
+        {group.pendingCount > 0 && (
+          <span className="picks-row__pending" title="Pinned, but not in the published catalogue yet">
+            {group.pendingCount} pending
+          </span>
+        )}
+        <div className="category-row__controls picks-row__controls">
+          <button className="category-row__arrow" onClick={() => scroll('left')} aria-label="Scroll left">
+            ‹
+          </button>
+          <button className="category-row__arrow" onClick={() => scroll('right')} aria-label="Scroll right">
+            ›
+          </button>
+        </div>
+      </div>
+
+      <div className="picks-row__track" ref={trackRef}>
+        {group.picks.map(({ channel, note, pending }) => (
+          <div className="picks-row__item" key={channel.id}>
+            <ChannelCard
+              channel={channel}
+              onWatch={onWatch}
+              playlist={playlist.length > 1 ? playlist : undefined}
+            />
+            {note && (
+              <p className="picks-row__note" title={note}>
+                {note}
+              </p>
+            )}
+            {!channel.stream && (
+              <p className="picks-row__unavailable">
+                {pending ? 'Not yet in the catalogue' : 'No stream available'}
+              </p>
+            )}
+          </div>
+        ))}
+      </div>
+    </section>
   )
 }
