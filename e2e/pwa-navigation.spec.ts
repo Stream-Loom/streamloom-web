@@ -61,9 +61,14 @@ function buildApp(): Promise<void> {
 }
 
 test.describe('/admin navigation vs the service worker (regression: 2026-09-23 Cloudflare Access bypass)', () => {
+  // One worker for the whole group: it shares one server on a fixed port.
+  test.describe.configure({ mode: 'default' })
+
   let wrangler: LoggedProcess | null = null
 
   test.beforeAll(async () => {
+    // The build and the server have their own budgets; the hook must outlast both.
+    test.setTimeout(BUILD_TIMEOUT_MS + READY_TIMEOUT_MS + 30_000)
     await buildApp()
     // The real `wrangler.jsonc` at the project root, not an isolated fixture: unlike
     // `workerd-smoke.spec.ts`, this test wants the project's actual `assets.directory`,
@@ -73,7 +78,7 @@ test.describe('/admin navigation vs the service worker (regression: 2026-09-23 C
     // is wired up — this suite is narrowly about the navigation/service-worker layer.
     wrangler = spawnLogged(
       'npx',
-      ['wrangler', 'pages', 'dev', 'dist', '--ip', '127.0.0.1', '--port', String(WRANGLER_PORT)],
+      ['wrangler', 'pages', 'dev', 'dist', '--ip', '127.0.0.1', '--port', String(WRANGLER_PORT), '--inspector-port', '9231'],
       { cwd: PROJECT_ROOT },
     )
     await waitUntilReady(`${WRANGLER_URL}/`, READY_TIMEOUT_MS)

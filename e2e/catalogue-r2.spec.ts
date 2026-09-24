@@ -29,7 +29,10 @@ const r2 = r2Server.mock
 
 test.beforeAll(() => r2Server.listen())
 test.afterAll(() => r2Server.close())
-test.beforeEach(() => r2Server.reset())
+test.beforeEach(({ context }) => {
+  r2Server.reset()
+  return r2Server.route(context)
+})
 
 /** Generation the Redis mock publishes when a test wants it to differ from R2's. */
 const REDIS_GENERATION = DEFAULT_GENERATION - 500
@@ -310,6 +313,7 @@ test.describe('R2 first, then Redis', () => {
     await catalogueStoredAs(page, REDIS_GENERATION)
     await settle(page, redis)
     report('R2 down', redis)
+    expect(r2.count('meta')).toBeGreaterThan(0)
 
     expect(redis.count('meta')).toBeGreaterThanOrEqual(1)
     expect(redis.count('channels')).toBe(6)
@@ -323,6 +327,7 @@ test.describe('R2 first, then Redis', () => {
     await page.goto('/')
     await waitForChannels(page)
     await catalogueStoredAs(page, REDIS_GENERATION)
+    expect(r2.count('meta')).toBeGreaterThan(0)
     expect(redis.count('channels')).toBe(6)
   })
 
@@ -358,6 +363,7 @@ test.describe('R2 first, then Redis', () => {
       await page.goto('/')
       await waitForChannels(page)
       await catalogueStoredAs(page, REDIS_GENERATION)
+      expect(r2.count('channels')).toBeGreaterThan(0)
       expect(redis.count('channels')).toBe(6)
     })
   }
@@ -372,6 +378,7 @@ test.describe('R2 first, then Redis', () => {
       await page.goto('/')
       await waitForChannels(page)
       await catalogueStoredAs(page, REDIS_GENERATION)
+      expect(r2.count('meta')).toBeGreaterThan(0)
       // Nothing beyond meta and the generation-independent picks object was
       // downloaded from a snapshot this client cannot read.
       expect(generationKinds()).toEqual([])

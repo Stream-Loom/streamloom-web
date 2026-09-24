@@ -31,10 +31,12 @@ const upstashEnv =
  */
 export default defineConfig({
   testDir: './e2e',
-  fullyParallel: false,
+  // Every test gets a fresh browser context; specs that count reads mock Redis per
+  // context and R2 per worker (e2e/support/r2Mock.ts). Workers default to half
+  // the cores; `--workers=N` overrides.
+  fullyParallel: true,
   forbidOnly: true,
   retries: 0,
-  workers: 1,
   reporter: [['list']],
   timeout: 90_000,
   expect: { timeout: 20_000 },

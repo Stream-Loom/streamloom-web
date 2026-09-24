@@ -45,6 +45,9 @@ async function waitForDispatch(dispatchMock: ReturnType<typeof createDispatchMoc
 }
 
 test.describe('fast-track dispatch under real workerd (regression: 2026-09-22 silent-dispatch incident)', () => {
+  // One worker for the whole group: it shares one server on a fixed port.
+  test.describe.configure({ mode: 'default' })
+
   let wrangler: LoggedProcess | null = null
   const dispatchMock = createDispatchMock()
 
@@ -61,6 +64,8 @@ test.describe('fast-track dispatch under real workerd (regression: 2026-09-22 si
       '127.0.0.1',
       '--port',
       String(WRANGLER_PORT),
+      '--inspector-port',
+      '9230',
       '-b',
       'GITHUB_DISPATCH_TOKEN=smoke-test-token',
       '-b',
@@ -106,7 +111,7 @@ test.describe('fast-track dispatch under real workerd (regression: 2026-09-22 si
     const res = await fetch(`${WRANGLER_URL}/api/smoke`, { method: 'POST' })
     const responseMs = Date.now() - start
     expect(res.status).toBe(200)
-    expect(responseMs).toBeLessThan(1_000)
+    expect(responseMs).toBeLessThan(dispatchMock.delayMs / 2)
 
     // The slow dispatch is still in flight (or just landing) — prove it happens too, just
     // not before the response above.

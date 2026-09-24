@@ -1,4 +1,6 @@
 import http from 'node:http'
+import type { AddressInfo } from 'node:net'
+import type { BrowserContext } from '@playwright/test'
 import zlib from 'node:zlib'
 import { readFileSync } from 'node:fs'
 import { DEFAULT_GENERATION, scheduleFor, syntheticCatalogue } from './catalogueData'
@@ -15,11 +17,14 @@ import type { CatalogueOptions } from './catalogueData'
  * request so a test can count them and the bytes on the wire.
  *
  * The dev server is started with `VITE_CATALOGUE_R2_BASE_URL` set to this host
- * (playwright.config.ts), so specs never reach the real bucket.
+ * (playwright.config.ts), so specs never reach the real bucket. Nothing listens
+ * on it: each worker's server takes an ephemeral port and `route(context)`
+ * re-targets the browser's requests there, so specs run in parallel without
+ * sharing a port or each other's state. The rewrite is a `route.continue`, not a
+ * `fulfill`, so the response still arrives over a real socket, brotli and all.
  */
 
-export const R2_MOCK_PORT = 5198
-export const R2_MOCK_BASE_URL = `http://127.0.0.1:${R2_MOCK_PORT}`
+export const R2_MOCK_BASE_URL = 'http://127.0.0.1:5198'
 
 export type R2Kind =
   | 'meta'
@@ -83,8 +88,10 @@ export interface R2Mock {
 
 export interface R2Server {
   mock: R2Mock
-  /** Starts listening on `R2_MOCK_PORT`. */
+  /** Starts listening on an ephemeral port. */
   listen(): Promise<void>
+  /** Sends `context`'s requests for `R2_MOCK_BASE_URL` to this server; call per test. */
+  route(context: BrowserContext): Promise<void>
   /** Back to a healthy synthetic catalogue with an empty request log. */
   reset(options?: CatalogueOptions): void
   close(): Promise<void>
@@ -264,8 +271,17 @@ export function createR2Server(): R2Server {
     listen: () =>
       new Promise<void>((resolve, reject) => {
         server.once('error', reject)
-        server.listen(R2_MOCK_PORT, '127.0.0.1', resolve)
+        server.listen(0, '127.0.0.1', () => {
+          server.off('error', reject)
+          resolve()
+        })
       }),
+    route: (context) => {
+      const target = `http://127.0.0.1:${(server.address() as AddressInfo).port}`
+      return context.route(`${R2_MOCK_BASE_URL}/**`, (route) =>
+        route.continue({ url: target + route.request().url().slice(R2_MOCK_BASE_URL.length) }),
+      )
+    },
     reset(next = {}) {
       generation = DEFAULT_GENERATION
       options = next

@@ -105,10 +105,16 @@ async function openHome(page: Page, context: Parameters<typeof installUpstashMoc
   await expect(page.locator('body')).toContainText('Channel', { timeout: 60_000 })
 }
 
-test.beforeEach(() => {
+test.beforeEach(async ({ context }) => {
   r2Server.reset(CATALOGUE)
   r2.setPicks(picksDocument())
   r2.setFastTrack(fastTrackDocument())
+  // Served locally: a failed load of the real icon fires the onError fallback, which
+  // swaps `src` before the assertion can read it, and no test may depend on the live CDN.
+  await context.route('https://icons.softarchium.com/**', (route) =>
+    route.fulfill({ contentType: 'image/gif', body: Buffer.from('R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7', 'base64') }),
+  )
+  await r2Server.route(context)
 })
 
 test('pinned channels are shown, with the note and the no-stream state', async ({ page, context }) => {

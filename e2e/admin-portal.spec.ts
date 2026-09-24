@@ -73,7 +73,10 @@ function freshState(overrides: Partial<PortalState> = {}): PortalState {
   }
 }
 
-test.beforeEach(() => r2Server.reset(CATALOGUE))
+test.beforeEach(({ context }) => {
+  r2Server.reset(CATALOGUE)
+  return r2Server.route(context)
+})
 
 test('the portal is not linked from anywhere in the app', async ({ page, context }) => {
   await installUpstashMock(context, CATALOGUE)
