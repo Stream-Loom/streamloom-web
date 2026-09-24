@@ -145,7 +145,7 @@ effect on production until it is added in the dashboard as well, and adding
 - `App.tsx` prefetches the player chunk (hls.js) once a catalogue is on screen and the page is idle (skipped under Save-Data and on 2G), so the first channel opened does not wait on it.
 - `vite.config.ts` injects a preload of `catalogue/meta.json` into `index.html`, so the catalogue pointer arrives while the bundle downloads rather than after it runs.
 - `src/util/preconnect.ts` opens the connection (DNS, TCP, TLS; no bytes, no Function invocation) to the stream server the player will try first: for a card after a short focus/hover dwell, and for both neighbours once the current channel plays. Proxied streams are skipped (same origin, already connected); so is Save-Data. Live playlists are not cacheable, so fetching a neighbour's manifest ahead of time warmed nothing and is no longer done.
-- On a return visit the search index is built at idle (or on the first search), not before the grid paints (`setSearchIndexLazy` in `searchText.ts`).
+- The search index is keyed on the catalogue array itself (`searchIndexFor` in `searchText.ts`), so a background refresh can never leave a memoised search on the previous generation. The catalogue worker ships it ready-built; otherwise (a return visit, or the main-thread fallback) it is built at idle after the grid paints, or on the first search if that comes sooner.
 
 ### 4. Catalogue Read Path & Read Budget
 - **Rule**: **R2 first, Redis only as a fallback** (ADR-0030). `catalogueSource.ts` asks `r2.ts`

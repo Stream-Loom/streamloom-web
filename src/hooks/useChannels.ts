@@ -11,10 +11,8 @@ import type { CatalogueGeneration, CatalogueSource } from '../api/catalogueSourc
 import { loadSchedule } from '../util/scheduleLoader'
 import { enrichChannels } from '../util/enrich'
 import {
-  buildSearchIndex,
-  ensureSearchIndex,
+  searchIndexFor,
   setSearchIndex as installSearchIndex,
-  setSearchIndexLazy,
   type SearchIndex,
 } from '../util/searchText'
 import {
@@ -201,9 +199,20 @@ function applyLoad(load: CatalogueLoad, source: CatalogueSource | 'cache') {
   _loading = false
   _error = null
   _retryAttempt = 0
-  // Install the search index (worker path) or build one on the main thread.
-  const index = load.searchIndex ?? buildSearchIndex(load.channels)
-  installSearchIndex(index)
+  // The worker ships a ready index; the main-thread fallback builds one at idle.
+  if (load.searchIndex) installSearchIndex(load.channels, load.searchIndex)
+  else prebuildSearchIndex(load.channels)
+}
+
+/**
+ * Builds the search index for `catalogue` once the page is idle, so the first
+ * keystroke does not pay for it (a search typed sooner builds it on the spot).
+ * Skipped if a newer generation replaced `catalogue` in the meantime.
+ */
+function prebuildSearchIndex(catalogue: EnrichedChannel[]) {
+  const build = () => { if (_channels === catalogue) searchIndexFor(catalogue) }
+  if (typeof requestIdleCallback === 'function') requestIdleCallback(build, { timeout: 2000 })
+  else setTimeout(build, 0)
 }
 
 /** Shown when nothing can be loaded and there is no cached catalogue to fall back on. */
@@ -264,13 +273,9 @@ async function loadData(force = false) {
       _loading = false
       _error = null
       // The search index is built after the grid paints, not before: the trigram
-      // build over every channel is main-thread work a return visit waited on. A
-      // search typed before then builds it on the spot; a refresh that finds a new
-      // generation installs its own index, which discards this pending build.
-      setSearchIndexLazy(() => buildSearchIndex(stored.channels))
+      // build over every channel is main-thread work a return visit waited on.
       notify()
-      if (typeof requestIdleCallback === 'function') requestIdleCallback(ensureSearchIndex, { timeout: 2000 })
-      else setTimeout(ensureSearchIndex, 0)
+      prebuildSearchIndex(stored.channels)
       loadData(true).catch(() => {})
       return
     }

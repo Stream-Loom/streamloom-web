@@ -55,7 +55,7 @@ export function Home() {
   const location = useLocation()
   // `allChannels` is the list before the hidden/broken filters. The picks row
   // needs it: a pinned channel is never hidden by a broken mark or by the user's
-  // hide-broken setting (ADR-0033 §3). Nothing else on this page uses it.
+  // hide-broken setting (ADR-0033 §3). It is also what the search index is keyed on.
   const { channels, allChannels, categories, loading, error, refresh } = useChannels()
   const { favouriteIds } = useFavourites()
   const { recentIds, addRecent } = useRecent()
@@ -139,8 +139,8 @@ export function Home() {
    * intersection regardless of how many facets the screen shows.
    */
   const matchSet = useMemo(
-    () => computeMatchSet(normalizedSearch),
-    [normalizedSearch],
+    () => computeMatchSet(normalizedSearch, allChannels),
+    [normalizedSearch, allChannels],
   )
 
   /**

@@ -36,7 +36,7 @@ function readInitialState(): GuideFilterState {
 }
 
 export function Guide() {
-  const { channels, categories, epgChannelIds, epgAvailable, refreshEpg, loading, generation } = useChannels()
+  const { channels, allChannels, categories, epgChannelIds, epgAvailable, refreshEpg, loading, generation } = useChannels()
   const { favouriteIds } = useFavourites()
   const [state, setState] = useState<GuideFilterState>(readInitialState)
 
@@ -101,8 +101,8 @@ export function Guide() {
    */
   const deferredSearch = useDeferredValue(state.search)
   const matchSet = useMemo(
-    () => computeMatchSet(normalizeSearch(deferredSearch.trim())),
-    [deferredSearch],
+    () => computeMatchSet(normalizeSearch(deferredSearch.trim()), allChannels),
+    [deferredSearch, allChannels],
   )
 
   return (
