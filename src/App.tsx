@@ -8,6 +8,12 @@ import { Settings } from './pages/Settings'
 import { afterCatalogue } from './hooks/useChannels'
 import { connectionInfo } from './util/bandwidth'
 import { loadWatch } from './util/watchChunk'
+import { applyTvMode } from './util/tvMode'
+
+// Runs once at module load, before the first paint: a TV browser's overscan
+// padding and type scale (see index.css) need to be in the initial CSSOM,
+// not applied after a flash of the desktop layout.
+applyTvMode()
 
 /*
  * The watch route is the only consumer of VideoPlayer, which pulls in hls.js

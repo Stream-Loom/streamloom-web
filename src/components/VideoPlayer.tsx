@@ -2,9 +2,8 @@ import { useEffect, useLayoutEffect, useRef, useState, useCallback, useMemo } fr
 import { useNavigate } from 'react-router-dom'
 import Hls, { type PlaylistLoaderConstructor } from 'hls.js'
 import type { EnrichedChannel } from '../hooks/useChannels'
-import type { EpgProgram } from '../api/types'
 import { useEpg, useFavourites, useRecent } from '../hooks/useChannels'
-import { formatCountryDisplay } from '../util/country'
+import { getCurrentProgram, getNextProgram } from '../util/epgNow'
 import { LOGO_SIZE, logoUrl, handleLogoError } from '../util/logo'
 import { markPlayerLogoForTransition } from '../util/viewTransition'
 import { orderStreamsForPlayback, rankResolution } from '../util/resolution'
@@ -29,12 +28,15 @@ import { rememberBandwidth, startingBandwidth } from '../util/bandwidth'
 import { preconnectChannel } from '../util/preconnect'
 import { HandoffLoader } from '../util/handoffLoader'
 import { MANIFEST_TIMEOUT_MS } from '../util/playlistPrefetch'
+import { MiniGuideRow } from './MiniGuideRow'
 import './VideoPlayer.css'
 
 interface Props {
   channel: EnrichedChannel
   allChannels: EnrichedChannel[]
   returnTo?: string
+  /** Channel ids with a published schedule (epg/ids.json). Gates the mini-guide's now/next fetch. */
+  epgChannelIds?: Set<string>
 }
 
 export interface MediaTrackItem {
@@ -42,14 +44,6 @@ export interface MediaTrackItem {
   name: string
   lang?: string
   type?: string
-}
-
-function getCurrentProgram(programs: EpgProgram[], nowMs: number): EpgProgram | undefined {
-  return programs.find((p) => {
-    const start = new Date(p.start_time).getTime()
-    const end = new Date(p.end_time).getTime()
-    return nowMs >= start && nowMs < end
-  })
 }
 
 /*
@@ -77,11 +71,10 @@ interface FailureEvidence {
   verdicts: Map<number, FailureClass>
 }
 
-export function VideoPlayer({ channel, allChannels, returnTo = '/' }: Props) {
+export function VideoPlayer({ channel, allChannels, returnTo = '/', epgChannelIds }: Props) {
   const videoRef = useRef<HTMLVideoElement>(null)
   const containerRef = useRef<HTMLDivElement>(null)
   const playerLogoRef = useRef<HTMLImageElement>(null)
-  const activeDrawerItemRef = useRef<HTMLButtonElement>(null)
   const hlsRef = useRef<Hls | null>(null)
   const navigate = useNavigate()
   const { programs } = useEpg(channel.id)
@@ -1307,6 +1300,9 @@ export function VideoPlayer({ channel, allChannels, returnTo = '/' }: Props) {
     } else if (e.key === 'a' || e.key === 'A') {
       e.preventDefault()
       cycleAudioTracks()
+    } else if (e.key === 'g' || e.key === 'G') {
+      e.preventDefault()
+      setShowChannelList((v) => !v)
     }
   }, [
     showChannelList,
@@ -1337,10 +1333,6 @@ export function VideoPlayer({ channel, allChannels, returnTo = '/' }: Props) {
     return () => window.removeEventListener('keydown', handleKeyDown)
   }, [])
 
-  useEffect(() => {
-    if (showChannelList) activeDrawerItemRef.current?.scrollIntoView({ block: 'center' })
-  }, [showChannelList])
-
   const [currentTimestamp, setCurrentTimestamp] = useState(() => Date.now())
   useEffect(() => {
     const tick = () => setCurrentTimestamp(Date.now())
@@ -1349,11 +1341,25 @@ export function VideoPlayer({ channel, allChannels, returnTo = '/' }: Props) {
     return () => window.clearInterval(id)
   }, [channel.id])
   const nowPlaying = useMemo(() => getCurrentProgram(programs, currentTimestamp), [programs, currentTimestamp])
-  const nextProgram = useMemo(
-    () => programs.find((p) => new Date(p.start_time).getTime() > currentTimestamp),
-    [programs, currentTimestamp]
-  )
+  const nextProgram = useMemo(() => getNextProgram(programs, currentTimestamp), [programs, currentTimestamp])
   const fav = isFavourite(channel.id)
+
+  // Mini-guide row order (S3): the playing channel first, then the rest of the
+  // playlist in their existing order, wrapping around.
+  const guideChannels = useMemo(() => {
+    const idx = allChannels.findIndex((c) => c.id === channel.id)
+    if (idx <= 0) return allChannels
+    return [...allChannels.slice(idx), ...allChannels.slice(0, idx)]
+  }, [allChannels, channel.id])
+
+  const handleGuidePick = useCallback(
+    (picked: EnrichedChannel) => {
+      setShowChannelList(false)
+      targetChannelIdRef.current = picked.id
+      switchChannelCleanly(picked)
+    },
+    [switchChannelCleanly],
+  )
 
   // Lock-screen, hardware-key and PiP transport controls. previous/next map
   // to zapping, same as the keyboard shortcuts.
@@ -1836,54 +1842,30 @@ export function VideoPlayer({ channel, allChannels, returnTo = '/' }: Props) {
         </div>
       </div>
 
-      {/* Side Channel Switcher Drawer */}
+      {/* Mini-guide (S3): logo, name, now/next per row, starting at the playing channel */}
       {showChannelList && (
         <div className="player__drawer glass">
           <div className="player__drawer-header">
-            <h3>Playlist Channels ({allChannels.length})</h3>
-            <button onClick={() => setShowChannelList(false)} aria-label="Close drawer">✕</button>
+            <h3>Guide ({guideChannels.length})</h3>
+            <button onClick={() => setShowChannelList(false)} aria-label="Close guide">✕</button>
           </div>
           <div className="player__drawer-list">
-            {allChannels.map((c) => {
-              const isActive = c.id === channel.id
-              return (
-                <button
-                  key={c.id}
-                  ref={isActive ? activeDrawerItemRef : undefined}
-                  type="button"
-                  className={`player__drawer-item ${isActive ? 'player__drawer-item--active' : ''}`}
-                  onClick={() => {
-                    setShowChannelList(false)
-                    targetChannelIdRef.current = c.id
-                    switchChannelCleanly(c)
-                  }}
-                >
-                  {logoUrl(c.logo) ? (
-                    <img
-                      src={logoUrl(c.logo)!}
-                      alt={c.name}
-                      width={LOGO_SIZE}
-                      height={LOGO_SIZE}
-                      loading="lazy"
-                      decoding="async"
-                      onError={handleLogoError}
-                      className="player__drawer-logo"
-                    />
-                  ) : (
-                    <div className="player__drawer-initials">{c.name.slice(0, 2).toUpperCase()}</div>
-                  )}
-                  <span className="player__drawer-name">{c.name}</span>
-                  {c.country && <span className="player__drawer-badge">{formatCountryDisplay(c.country)}</span>}
-                </button>
-              )
-            })}
+            {guideChannels.map((c) => (
+              <MiniGuideRow
+                key={c.id}
+                channel={c}
+                active={c.id === channel.id}
+                hasSchedule={epgChannelIds?.has(c.id) ?? false}
+                onPick={handleGuidePick}
+              />
+            ))}
           </div>
         </div>
       )}
 
       {/* Controls hint */}
       <p className="player__hint">
-        ← / → switch channel · Space play/pause · M mute · C subtitles · A audio · F fullscreen · Esc return
+        ← / → switch channel · G guide · Space play/pause · M mute · C subtitles · A audio · F fullscreen · Esc return
       </p>
     </div>
   )

@@ -409,6 +409,71 @@ export function EpgGuide({
     [guideChannels, firstRowForWindow, lastRowForWindow, cacheTick],
   )
 
+  /**
+   * Arrow-key grid movement (S5): Left/Right walk the focusable stops within
+   * the current row (channel column, then each programme box); Up/Down move
+   * to the row above/below, landing on the programme box closest to the same
+   * horizontal position so a viewer scanning a time column stays in it.
+   *
+   * Rows outside the virtualizer's rendered window (`OVERSCAN_PX`) don't
+   * exist in the DOM yet, so a jump that lands there is a no-op — the normal
+   * case only up/down by one row from what's already rendered.
+   */
+  const handleGuideKeyDown = useCallback((e: React.KeyboardEvent<HTMLDivElement>) => {
+    if (!['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(e.key)) return
+    const target = e.target as HTMLElement
+    const row = target.closest<HTMLElement>('.epg-guide__row')
+    if (!row) return
+
+    if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
+      const stops = Array.from(row.querySelectorAll<HTMLElement>('[tabindex="0"]'))
+      const idx = stops.indexOf(target)
+      if (idx === -1) return
+      const next = stops[idx + (e.key === 'ArrowRight' ? 1 : -1)]
+      if (next) {
+        e.preventDefault()
+        next.focus()
+        next.scrollIntoView({ behavior: 'smooth', block: 'nearest', inline: 'nearest' })
+      }
+      return
+    }
+
+    const rowIndex = Number(row.dataset.rowIndex)
+    if (Number.isNaN(rowIndex)) return
+    const direction = e.key === 'ArrowDown' ? 1 : -1
+    const targetRow = viewportRef.current?.querySelector<HTMLElement>(
+      `.epg-guide__row[data-row-index="${rowIndex + direction}"]`,
+    )
+    e.preventDefault()
+    if (!targetRow) {
+      // The target row is one step beyond the virtualizer's rendered window (its
+      // overscan is generous but finite). Nudge the scroll position the same
+      // direction so the window grows to cover it — the next press then lands
+      // normally — instead of leaving the key press with no visible effect.
+      viewportRef.current?.scrollBy({ top: direction * rowHeight, behavior: 'smooth' })
+      return
+    }
+
+    const isChannelColumn = target.classList.contains('epg-guide__channel')
+    const channelStop = targetRow.querySelector<HTMLElement>('.epg-guide__channel')
+    let landing: HTMLElement | null = channelStop
+    if (!isChannelColumn) {
+      const targetLeft = target.getBoundingClientRect().left
+      const boxes = Array.from(targetRow.querySelectorAll<HTMLElement>('.epg-guide__program'))
+      landing =
+        boxes.reduce<HTMLElement | null>((closest, el) => {
+          if (!closest) return el
+          const d = Math.abs(el.getBoundingClientRect().left - targetLeft)
+          const dClosest = Math.abs(closest.getBoundingClientRect().left - targetLeft)
+          return d < dClosest ? el : closest
+        }, null) ?? channelStop
+    }
+    if (landing) {
+      landing.focus()
+      landing.scrollIntoView({ behavior: 'smooth', block: 'nearest', inline: 'nearest' })
+    }
+  }, [rowHeight])
+
   const handleScroll = useCallback((e: React.UIEvent<HTMLDivElement>) => {
     const el = e.currentTarget
     // rAF-throttle: one state write per frame regardless of scroll event rate.
@@ -516,7 +581,12 @@ export function EpgGuide({
         </div>
       )}
 
-      <div className="epg-guide__grid" ref={viewportRef} onScroll={handleScroll}>
+      <div
+        className="epg-guide__grid"
+        ref={viewportRef}
+        onScroll={handleScroll}
+        onKeyDown={handleGuideKeyDown}
+      >
         <EpgTimeline
           marks={marks}
           gridWidth={gridWindow.width}
@@ -541,6 +611,7 @@ export function EpgGuide({
                 sidebarWidth={sidebarWidth}
                 top={(firstRowForWindow + i) * rowHeight}
                 rowHeight={rowHeight}
+                rowIndex={firstRowForWindow + i}
                 onPick={handlePick}
               />
             ))}

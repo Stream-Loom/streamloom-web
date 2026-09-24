@@ -56,7 +56,7 @@ export function Home() {
   // `allChannels` is the list before the hidden/broken filters. The picks row
   // needs it: a pinned channel is never hidden by a broken mark or by the user's
   // hide-broken setting (ADR-0033 §3). It is also what the search index is keyed on.
-  const { channels, allChannels, categories, loading, error, refresh } = useChannels()
+  const { channels, allChannels, categories, epgChannelIds, loading, error, refresh } = useChannels()
   const { favouriteIds } = useFavourites()
   const { recentIds, addRecent } = useRecent()
 
@@ -638,14 +638,14 @@ export function Home() {
               {/* Author's picks, favourites and recents stay visible under a
                   filter, narrowed to their matches, rather than disappearing
                   into the flat grid below. */}
-              <PicksRow channels={allChannels} onWatch={handleWatch} filter={filterMatches} />
+              <PicksRow channels={allChannels} onWatch={handleWatch} filter={filterMatches} epgChannelIds={epgChannelIds} />
 
               {!showFavOnly && filteredFavouriteChannels.length > 0 && (
-                <CategoryRow title="♥ Favourites" channels={filteredFavouriteChannels} onWatch={handleWatch} />
+                <CategoryRow title="♥ Favourites" channels={filteredFavouriteChannels} onWatch={handleWatch} epgChannelIds={epgChannelIds} />
               )}
 
               {filteredRecentChannels.length > 0 && (
-                <CategoryRow title="▶ Continue Watching" channels={filteredRecentChannels} onWatch={handleWatch} />
+                <CategoryRow title="▶ Continue Watching" channels={filteredRecentChannels} onWatch={handleWatch} epgChannelIds={epgChannelIds} />
               )}
 
               <section className="home-search-results fade-up">
@@ -670,7 +670,7 @@ export function Home() {
                 ) : (
                   <div className="home-search-results__grid">
                     {activeGridChannels.slice(0, gridLimit).map((ch) => (
-                      <ChannelCard key={ch.id} channel={ch} playlist={activeGridPlaylist} onWatch={handleWatch} />
+                      <ChannelCard key={ch.id} channel={ch} epgChannelIds={epgChannelIds} playlist={activeGridPlaylist} onWatch={handleWatch} />
                     ))}
                   </div>
                 )}
@@ -691,16 +691,16 @@ export function Home() {
             /* Normal row mode */
             <>
               {/* Author's picks (ADR-0033): never filtered by a broken mark. */}
-              <PicksRow channels={allChannels} onWatch={handleWatch} />
+              <PicksRow channels={allChannels} onWatch={handleWatch} epgChannelIds={epgChannelIds} />
 
               {/* Favourites row */}
               {favouriteChannels.length > 0 && (
-                <CategoryRow title="♥ Favourites" channels={favouriteChannels} onWatch={handleWatch} />
+                <CategoryRow title="♥ Favourites" channels={favouriteChannels} onWatch={handleWatch} epgChannelIds={epgChannelIds} />
               )}
 
               {/* Recently watched */}
               {recentChannels.length > 0 && (
-                <CategoryRow title="▶ Continue Watching" channels={recentChannels} onWatch={handleWatch} />
+                <CategoryRow title="▶ Continue Watching" channels={recentChannels} onWatch={handleWatch} epgChannelIds={epgChannelIds} />
               )}
 
               {/* Priority Category Rows */}
@@ -714,6 +714,7 @@ export function Home() {
                     title={`${icon} ${cat.name}`}
                     channels={chans}
                     onWatch={handleWatch}
+                    epgChannelIds={epgChannelIds}
                   />
                 )
               })}

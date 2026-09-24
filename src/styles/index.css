@@ -130,6 +130,21 @@ html {
   -moz-osx-font-smoothing: grayscale;
 }
 
+/*
+ * 10-foot mode (S5): a TV browser (util/tvMode.ts sets this attribute before
+ * first paint) reads from further away and can lose content past the bezel.
+ * The type scale goes up site-wide, and overscan padding rides the same
+ * safe-area tokens Navbar.css and .page-wrapper already build their padding
+ * from — one override here, no other file needs to know TV mode exists.
+ */
+html[data-tv-mode='true'] {
+  font-size: 20px;
+  --sat: calc(env(safe-area-inset-top, 0px) + 32px);
+  --sar: calc(env(safe-area-inset-right, 0px) + 32px);
+  --sab: calc(env(safe-area-inset-bottom, 0px) + 32px);
+  --sal: calc(env(safe-area-inset-left, 0px) + 32px);
+}
+
 body {
   /* Apple devices render true SF; other platforms fall back to Inter. */
   font-family: -apple-system, BlinkMacSystemFont, 'Inter', 'Segoe UI', system-ui, sans-serif;

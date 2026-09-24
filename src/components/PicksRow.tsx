@@ -58,6 +58,7 @@ interface Props {
    * hidden, same as a group the author left empty.
    */
   filter?: (channel: EnrichedChannel) => boolean
+  epgChannelIds?: Set<string>
 }
 
 interface ResolvedPick {
@@ -113,7 +114,7 @@ function synthesizeFastTrackChannel(entry: FastTrackEntry): EnrichedChannel {
   }
 }
 
-export function PicksRow({ channels, onWatch, filter }: Props) {
+export function PicksRow({ channels, onWatch, filter, epgChannelIds }: Props) {
   const [picks, setPicks] = useState<PicksDocument | null>(null)
   const [fastTrack, setFastTrack] = useState<FastTrackEntry[] | null>(null)
 
@@ -198,7 +199,7 @@ export function PicksRow({ channels, onWatch, filter }: Props) {
   return (
     <>
       {groups.map((group) => (
-        <PicksGroupSection key={group.title} group={group} onWatch={onWatch} />
+        <PicksGroupSection key={group.title} group={group} onWatch={onWatch} epgChannelIds={epgChannelIds} />
       ))}
     </>
   )
@@ -210,7 +211,15 @@ export function PicksRow({ channels, onWatch, filter }: Props) {
  * reinvented). Split out from `PicksRow` because each group needs its own
  * scroll container ref, which a `.map()` callback cannot give a hook.
  */
-function PicksGroupSection({ group, onWatch }: { group: ResolvedGroup; onWatch?: (channelId: string) => void }) {
+function PicksGroupSection({
+  group,
+  onWatch,
+  epgChannelIds,
+}: {
+  group: ResolvedGroup
+  onWatch?: (channelId: string) => void
+  epgChannelIds?: Set<string>
+}) {
   const trackRef = useRef<HTMLDivElement>(null)
 
   function scroll(dir: 'left' | 'right') {
@@ -248,6 +257,7 @@ function PicksGroupSection({ group, onWatch }: { group: ResolvedGroup; onWatch?:
           <div className="picks-row__item" key={channel.id}>
             <ChannelCard
               channel={channel}
+              epgChannelIds={epgChannelIds}
               onWatch={onWatch}
               playlist={playlist.length > 1 ? playlist : undefined}
             />

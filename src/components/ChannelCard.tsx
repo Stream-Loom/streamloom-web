@@ -1,9 +1,12 @@
 import { useCallback, useEffect, useRef } from 'react'
 import { useNavigate, useLocation } from 'react-router-dom'
 import type { EnrichedChannel } from '../hooks/useChannels'
-import type { EpgProgram } from '../api/types'
 import { useFavourites } from '../hooks/useChannels'
+import { useNowPlaying } from '../hooks/useNowPlaying'
+import { useVisible } from '../hooks/useVisible'
+import { programProgress } from '../util/epgNow'
 import { formatCountryDisplay } from '../util/country'
+import { getLanguageName } from '../util/language'
 import { LOGO_SIZE, logoUrl, handleLogoError } from '../util/logo'
 import { preconnectChannel } from '../util/preconnect'
 import { prefetchPlaylist } from '../util/playlistPrefetch'
@@ -12,16 +15,21 @@ import './ChannelCard.css'
 
 interface Props {
   channel: EnrichedChannel
-  nowPlaying?: EpgProgram | null
+  /** Channel ids with a published schedule (epg/ids.json). Gates the now-playing fetch. */
+  epgChannelIds?: Set<string>
   size?: 'small' | 'medium' | 'large'
   onWatch?: (channelId: string) => void
   playlist?: string[]
 }
 
-export function ChannelCard({ channel, nowPlaying, size = 'medium', onWatch, playlist }: Props) {
+export function ChannelCard({ channel, epgChannelIds, size = 'medium', onWatch, playlist }: Props) {
   const navigate = useNavigate()
   const location = useLocation()
   const { isFavourite, toggle } = useFavourites()
+  const [visibleRef, visible] = useVisible<HTMLElement>()
+  const hasSchedule = epgChannelIds?.has(channel.id) ?? false
+  const { program: nowPlaying, now } = useNowPlaying(hasSchedule && visible ? channel.id : null)
+  const progress = nowPlaying ? programProgress(nowPlaying, now) : null
 
   const hasStream = !!channel.stream
   const fav = isFavourite(channel.id)
@@ -76,10 +84,13 @@ export function ChannelCard({ channel, nowPlaying, size = 'medium', onWatch, pla
   }, [channel.id, toggle])
 
   const countryDisplay = formatCountryDisplay(channel.country)
+  const languageDisplay = channel.languages?.[0] ? getLanguageName(channel.languages[0]) : null
+  const fallbackDisplay = [languageDisplay, countryDisplay].filter(Boolean).join(' · ')
   const logoSrc = logoUrl(channel.logo)
 
   return (
     <article
+      ref={visibleRef}
       className={`channel-card channel-card--${size} ${!hasStream ? 'channel-card--no-stream' : ''}`}
       data-card="channel"
       data-channel-id={channel.id}
@@ -126,12 +137,19 @@ export function ChannelCard({ channel, nowPlaying, size = 'medium', onWatch, pla
         <div className="channel-card__info">
           <p className="channel-card__name" title={channel.name}>{channel.name}</p>
           {nowPlaying ? (
-            <p className="channel-card__epg" title={nowPlaying.title}>
-              <span className="live-dot" style={{ marginRight: 6 }} />
-              <span className="channel-card__epg-text">{nowPlaying.title}</span>
-            </p>
-          ) : countryDisplay ? (
-            <p className="channel-card__country" title={countryDisplay}>{countryDisplay}</p>
+            <>
+              <p className="channel-card__epg" title={nowPlaying.title}>
+                <span className="live-dot" style={{ marginRight: 6 }} />
+                <span className="channel-card__epg-text">{nowPlaying.title}</span>
+              </p>
+              {progress !== null && (
+                <div className="channel-card__progress" aria-hidden="true">
+                  <div className="channel-card__progress-fill" style={{ width: `${progress * 100}%` }} />
+                </div>
+              )}
+            </>
+          ) : fallbackDisplay ? (
+            <p className="channel-card__country" title={fallbackDisplay}>{fallbackDisplay}</p>
           ) : null}
         </div>
       </button>
