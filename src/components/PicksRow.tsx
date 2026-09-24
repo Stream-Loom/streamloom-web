@@ -49,6 +49,15 @@ interface Props {
    */
   channels: EnrichedChannel[]
   onWatch?: (channelId: string) => void
+  /**
+   * A Home-screen filter (category/country/quality/search), applied only to what
+   * is displayed. Identity resolution above still runs against the unfiltered
+   * `channels`, so a pin that fails this predicate reads as "filtered out", never
+   * as "not yet in the catalogue" — the two are different facts and ADR-0033
+   * §3 already draws that line for broken marks. A group with no matches is
+   * hidden, same as a group the author left empty.
+   */
+  filter?: (channel: EnrichedChannel) => boolean
 }
 
 interface ResolvedPick {
@@ -104,7 +113,7 @@ function synthesizeFastTrackChannel(entry: FastTrackEntry): EnrichedChannel {
   }
 }
 
-export function PicksRow({ channels, onWatch }: Props) {
+export function PicksRow({ channels, onWatch, filter }: Props) {
   const [picks, setPicks] = useState<PicksDocument | null>(null)
   const [fastTrack, setFastTrack] = useState<FastTrackEntry[] | null>(null)
 
@@ -174,13 +183,15 @@ export function PicksRow({ channels, onWatch }: Props) {
         }
         resolved.push({ channel: synthesized, note: item.note, pending: true })
       }
-      // A group is hidden only when the author left it empty (or nothing in it
-      // has reached the catalogue yet) — never because its channels look broken.
-      if (resolved.length === 0) continue
-      out.push({ title: group.title, picks: resolved, pendingCount })
+      const displayed = filter ? resolved.filter((pick) => filter(pick.channel)) : resolved
+      // A group is hidden when the author left it empty, nothing in it has
+      // reached the catalogue yet, or (with a Home filter active) none of its
+      // picks match it — never because its channels look broken.
+      if (displayed.length === 0) continue
+      out.push({ title: group.title, picks: displayed, pendingCount })
     }
     return out
-  }, [picks, byId, byFastTrack])
+  }, [picks, byId, byFastTrack, filter])
 
   if (groups.length === 0) return null
 

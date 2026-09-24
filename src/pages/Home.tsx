@@ -11,7 +11,7 @@ import { FilterSheet } from '../components/FilterSheet'
 import { useKeyboardNav } from '../hooks/useKeyboardNav'
 import { getCountryName, getCountryFlag, formatCountryDisplay } from '../util/country'
 import { getLanguageName } from '../util/language'
-import { computeMatchSet, normalizeSearch } from '../util/searchText'
+import { computeMatchSet, matchesSearch, normalizeSearch } from '../util/searchText'
 import './Home.css'
 
 const PRIORITY_CATEGORIES = ['music', 'movies', 'cartoons', 'comedy', 'news', 'sports']
@@ -290,6 +290,27 @@ export function Home() {
 
   const handleWatch = useCallback((channelId: string) => addRecent(channelId), [addRecent])
 
+  /**
+   * Whether a channel matches the active Home filters (category/country/language/
+   * quality/favourites + search). Used to keep the Picks/Favourites/Recents rows
+   * visible under a filter, narrowed to their matches, instead of disappearing
+   * into the flat grid.
+   *
+   * `matchSet` is built from the trigram index over the live catalogue only
+   * (see useChannels/searchText), so it never contains a Picks row's
+   * fast-track or pending-snapshot channels — those ids don't exist in the
+   * index. Falling back to `matchesSearch` (a direct haystack scan, bypassing
+   * the index) for anything the set doesn't cover keeps a matching pin from
+   * being dropped by search the way ADR-0033 §3 already forbids for a broken
+   * mark.
+   */
+  const filterMatches = useCallback(
+    (ch: EnrichedChannel) =>
+      passesNonSearch(ch) &&
+      (!matchSet || matchSet.has(ch.id) || matchesSearch(ch, normalizedSearch)),
+    [passesNonSearch, matchSet, normalizedSearch],
+  )
+
   // Sync active filter selections to sessionStorage
   useEffect(() => {
     if (search) sessionStorage.setItem('sl_active_search', search)
@@ -382,6 +403,18 @@ export function Home() {
 
   const isGridMode = hasActiveFilter || Boolean(search.trim())
   const activeGridPlaylist = useMemo(() => activeGridChannels.map((c) => c.id), [activeGridChannels])
+
+  // Favourites/Recents narrowed to the active filters, for the grid-mode rows
+  // above. Picks narrows the same way, but inside PicksRow (see its `filter`
+  // prop) so a filtered-out pin never gets misread as "not yet published".
+  const filteredFavouriteChannels = useMemo(
+    () => (isGridMode ? favouriteChannels.filter(filterMatches) : []),
+    [isGridMode, favouriteChannels, filterMatches],
+  )
+  const filteredRecentChannels = useMemo(
+    () => (isGridMode ? recentChannels.filter(filterMatches) : []),
+    [isGridMode, recentChannels, filterMatches],
+  )
 
   const targetId =
     (location.state as { targetChannelId?: string } | null)?.targetChannelId ||
@@ -595,35 +628,50 @@ export function Home() {
 
           {/* Grid Mode: when any filter or search is active */}
           {isGridMode ? (
-            <section className="home-search-results fade-up">
-              <div className="home-search-results__title-bar">
-                <h2 className="home-search-results__title">
-                  {search.trim()
-                    ? `"${search}" — ${activeGridChannels.length} channels`
-                    : selectedCategory
-                      ? `${categories.find((c) => c.id === selectedCategory)?.name ?? 'Category'} — ${activeGridChannels.length} channels`
-                      : selectedCountry
-                        ? `${formatCountryDisplay(selectedCountry)} — ${activeGridChannels.length} channels`
-                        : `${activeGridChannels.length} channels`}
-                </h2>
-              </div>
-              <div className="home-search-results__grid">
-                {activeGridChannels.slice(0, gridLimit).map((ch) => (
-                  <ChannelCard key={ch.id} channel={ch} playlist={activeGridPlaylist} onWatch={handleWatch} />
-                ))}
-              </div>
+            <>
+              {/* Author's picks, favourites and recents stay visible under a
+                  filter, narrowed to their matches, rather than disappearing
+                  into the flat grid below. */}
+              <PicksRow channels={allChannels} onWatch={handleWatch} filter={filterMatches} />
 
-              {gridLimit < activeGridChannels.length && (
-                <div className="home-load-more">
-                  <button
-                    className="home-load-more__btn"
-                    onClick={() => setUserExpandedLimit((prev) => prev + GRID_BATCH_SIZE)}
-                  >
-                    Load More Channels ({activeGridChannels.length - gridLimit} remaining)
-                  </button>
-                </div>
+              {!showFavOnly && filteredFavouriteChannels.length > 0 && (
+                <CategoryRow title="♥ Favourites" channels={filteredFavouriteChannels} onWatch={handleWatch} />
               )}
-            </section>
+
+              {filteredRecentChannels.length > 0 && (
+                <CategoryRow title="▶ Continue Watching" channels={filteredRecentChannels} onWatch={handleWatch} />
+              )}
+
+              <section className="home-search-results fade-up">
+                <div className="home-search-results__title-bar">
+                  <h2 className="home-search-results__title">
+                    {search.trim()
+                      ? `"${search}" — ${activeGridChannels.length} channels`
+                      : selectedCategory
+                        ? `${categories.find((c) => c.id === selectedCategory)?.name ?? 'Category'} — ${activeGridChannels.length} channels`
+                        : selectedCountry
+                          ? `${formatCountryDisplay(selectedCountry)} — ${activeGridChannels.length} channels`
+                          : `${activeGridChannels.length} channels`}
+                  </h2>
+                </div>
+                <div className="home-search-results__grid">
+                  {activeGridChannels.slice(0, gridLimit).map((ch) => (
+                    <ChannelCard key={ch.id} channel={ch} playlist={activeGridPlaylist} onWatch={handleWatch} />
+                  ))}
+                </div>
+
+                {gridLimit < activeGridChannels.length && (
+                  <div className="home-load-more">
+                    <button
+                      className="home-load-more__btn"
+                      onClick={() => setUserExpandedLimit((prev) => prev + GRID_BATCH_SIZE)}
+                    >
+                      Load More Channels ({activeGridChannels.length - gridLimit} remaining)
+                    </button>
+                  </div>
+                )}
+              </section>
+            </>
           ) : (
             /* Normal row mode */
             <>
