@@ -55,6 +55,38 @@ const MAX_TOTAL_ITEMS = 200
 const MAX_NOTE_CHARS = 140
 const MAX_TITLE_CHARS = 60
 
+/**
+ * A hand-added channel (WO-21): stored shape plus a `localKey` for React identity that never
+ * leaves this component. A new entry has no `id` yet — the server assigns one on save
+ * (`_lib/customChannelsSchema.ts`) — so `localKey` is what list rendering and removal key on
+ * until the next successful save fills `id` in from the response.
+ */
+interface CustomChannelDraft {
+  localKey: string
+  id?: string
+  name: string
+  streamUrl: string
+  iconUrl?: string
+  country?: string
+}
+
+/** Same ceiling `_lib/customChannelsSchema.ts` enforces. */
+const MAX_CUSTOM_CHANNELS = 50
+const MAX_CUSTOM_NAME_CHARS = 100
+
+const newLocalKey = (): string =>
+  typeof crypto.randomUUID === 'function' ? crypto.randomUUID() : `local-${Date.now()}-${Math.random()}`
+
+/** Same check the write path makes: this is a URL the player or icon pipeline fetches directly. */
+function isHttpUrl(value: string): boolean {
+  try {
+    const url = new URL(value)
+    return url.protocol === 'http:' || url.protocol === 'https:'
+  } catch {
+    return false
+  }
+}
+
 function flagLabels(flags: Flags): string[] {
   const out: string[] = []
   if (flags.blocked) out.push(`blocklisted (${flags.blocked})`)
@@ -119,6 +151,22 @@ export function Admin() {
   const [results, setResults] = useState<SearchResult[]>([])
   const [resultTotal, setResultTotal] = useState(0)
   const [searching, setSearching] = useState(false)
+  /** Narrows the search to `catalogue/active-channel-ids.json` (WO-21). */
+  const [liveOnly, setLiveOnly] = useState(false)
+  /** Whether the last response actually applied the filter — the bucket read is best-effort. */
+  const [liveFilterApplied, setLiveFilterApplied] = useState(true)
+
+  const [customChannels, setCustomChannels] = useState<CustomChannelDraft[]>([])
+  const [customEtag, setCustomEtag] = useState<string | null>(null)
+  const [customDirty, setCustomDirty] = useState(false)
+  const [customLoadError, setCustomLoadError] = useState<string | null>(null)
+  const [customStatus, setCustomStatus] = useState('')
+  const [customErrors, setCustomErrors] = useState<string[]>([])
+  const [customSaving, setCustomSaving] = useState(false)
+  const [newChannelName, setNewChannelName] = useState('')
+  const [newStreamUrl, setNewStreamUrl] = useState('')
+  const [newIconUrl, setNewIconUrl] = useState('')
+  const [newCountry, setNewCountry] = useState('')
 
   const [targetGroup, setTargetGroup] = useState(0)
   const [newGroupTitle, setNewGroupTitle] = useState('')
@@ -261,7 +309,9 @@ export function Admin() {
     }
   }, [])
 
-  // Search, debounced. An empty form asks for nothing rather than for everything.
+  // Search, debounced. An empty form asks for nothing rather than for everything — except
+  // "live only" on its own is a real question ("what can I actually pin right now?"), so it
+  // counts as something to search for even with no text, country or category typed in.
   const searchSeq = useRef(0)
   useEffect(() => {
     if (phase !== 'ready') return
@@ -269,7 +319,7 @@ export function Admin() {
     // Clearing happens inside the timer too, so nothing sets state synchronously
     // at the root of the effect.
     const timer = setTimeout(() => {
-      if (!query.trim() && !country.trim() && !category.trim()) {
+      if (!query.trim() && !country.trim() && !category.trim() && !liveOnly) {
         setResults([])
         setResultTotal(0)
         return
@@ -279,18 +329,20 @@ export function Admin() {
       if (query.trim()) params.set('q', query.trim())
       if (country.trim()) params.set('country', country.trim())
       if (category.trim()) params.set('category', category.trim())
+      if (liveOnly) params.set('live', 'true')
       fetch(`/api/picks/channels?${params.toString()}`, {
         credentials: 'same-origin',
         headers: { accept: 'application/json' },
       })
         .then(async (res) => {
           if (!res.ok) throw new Error(String(res.status))
-          return (await res.json()) as { total: number; results: SearchResult[] }
+          return (await res.json()) as { total: number; results: SearchResult[]; live: boolean }
         })
         .then((body) => {
           if (seq !== searchSeq.current) return
           setResults(body.results)
           setResultTotal(body.total)
+          setLiveFilterApplied(body.live)
         })
         .catch(() => {
           if (seq !== searchSeq.current) return
@@ -302,7 +354,139 @@ export function Admin() {
         })
     }, SEARCH_DEBOUNCE_MS)
     return () => clearTimeout(timer)
-  }, [query, country, category, phase])
+  }, [query, country, category, liveOnly, phase])
+
+  // The custom-channels document, loaded once the portal itself is authenticated and ready —
+  // same gate as the live-generation read above, but this one needs the Access session, so it
+  // cannot run before `phase` says so.
+  const loadCustomChannels = useCallback(async () => {
+    try {
+      const res = await fetch('/api/picks/custom-channels', {
+        credentials: 'same-origin',
+        headers: { accept: 'application/json' },
+      })
+      if (!res.ok) {
+        setCustomLoadError(`Custom channels could not be loaded (${res.status}).`)
+        return
+      }
+      const body = (await res.json()) as {
+        channels: Omit<CustomChannelDraft, 'localKey'>[]
+        etag: string | null
+      }
+      setCustomChannels(body.channels.map((c) => ({ ...c, localKey: c.id ?? newLocalKey() })))
+      setCustomEtag(body.etag)
+      setCustomLoadError(null)
+      setCustomDirty(false)
+    } catch {
+      setCustomLoadError('Custom channels could not be reached.')
+    }
+  }, [])
+
+  useEffect(() => {
+    if (phase !== 'ready') return
+    // On a microtask, not synchronously: `loadCustomChannels` sets state on its first
+    // line, same reason `load` itself is deferred above.
+    void Promise.resolve().then(loadCustomChannels)
+  }, [phase, loadCustomChannels])
+
+  const addCustomChannel = useCallback(() => {
+    const name = newChannelName.trim()
+    const streamUrl = newStreamUrl.trim()
+    const iconUrl = newIconUrl.trim()
+    const country = newCountry.trim()
+    if (!name || !streamUrl) return
+    if (customChannels.length >= MAX_CUSTOM_CHANNELS) {
+      setCustomErrors([`At most ${MAX_CUSTOM_CHANNELS} custom channels.`])
+      return
+    }
+    if (!isHttpUrl(streamUrl)) {
+      setCustomErrors(['Stream URL must be a http:// or https:// URL.'])
+      return
+    }
+    if (iconUrl && !isHttpUrl(iconUrl)) {
+      setCustomErrors(['Icon URL must be a http:// or https:// URL, or left blank.'])
+      return
+    }
+    setCustomErrors([])
+    setCustomChannels((prev) => [
+      ...prev,
+      {
+        localKey: newLocalKey(),
+        name,
+        streamUrl,
+        ...(iconUrl ? { iconUrl } : {}),
+        ...(country ? { country: country.toUpperCase() } : {}),
+      },
+    ])
+    setCustomDirty(true)
+    setCustomStatus('')
+    setNewChannelName('')
+    setNewStreamUrl('')
+    setNewIconUrl('')
+    setNewCountry('')
+  }, [customChannels.length, newChannelName, newCountry, newIconUrl, newStreamUrl])
+
+  const removeCustomChannel = useCallback((localKey: string) => {
+    setCustomChannels((prev) => prev.filter((c) => c.localKey !== localKey))
+    setCustomDirty(true)
+    setCustomStatus('')
+  }, [])
+
+  const saveCustomChannels = useCallback(async () => {
+    setCustomSaving(true)
+    setCustomErrors([])
+    setCustomStatus('Saving…')
+    try {
+      const body = {
+        schema: 1,
+        channels: customChannels.map(({ localKey: _localKey, ...rest }) => rest),
+      }
+      const res = await fetch('/api/picks/custom-channels', {
+        method: 'PUT',
+        credentials: 'same-origin',
+        headers: {
+          'content-type': 'application/json',
+          accept: 'application/json',
+          ...(customEtag ? { 'if-match': customEtag } : {}),
+        },
+        body: JSON.stringify(body),
+      })
+      const payload = (await res.json().catch(() => null)) as Record<string, unknown> | null
+
+      if (res.status === 412) {
+        setCustomErrors([
+          String(payload?.detail ?? 'Someone else saved a newer copy.') +
+            ' The newer copy has been loaded; re-apply your changes and save again.',
+        ])
+        const channels = (payload?.channels as Omit<CustomChannelDraft, 'localKey'>[] | undefined) ?? []
+        setCustomChannels(channels.map((c) => ({ ...c, localKey: c.id ?? newLocalKey() })))
+        setCustomEtag((payload?.etag as string | null) ?? null)
+        setCustomStatus('Not saved: a newer copy was loaded.')
+        return
+      }
+      if (res.status === 401 || res.status === 403) {
+        setPhase('unauthorised')
+        return
+      }
+      if (!res.ok) {
+        const list = Array.isArray(payload?.errors) ? (payload.errors as string[]) : []
+        setCustomErrors(list.length > 0 ? list : [String(payload?.detail ?? `The save failed (${res.status}).`)])
+        setCustomStatus('Not saved.')
+        return
+      }
+
+      const channels = (payload?.channels as Omit<CustomChannelDraft, 'localKey'>[] | undefined) ?? []
+      setCustomChannels(channels.map((c) => ({ ...c, localKey: c.id ?? newLocalKey() })))
+      setCustomEtag((payload?.etag as string) ?? null)
+      setCustomDirty(false)
+      setCustomStatus(`Saved at ${String(payload?.updatedAt ?? 'now')}.`)
+    } catch {
+      setCustomErrors(['The save could not be sent.'])
+      setCustomStatus('Not saved.')
+    } finally {
+      setCustomSaving(false)
+    }
+  }, [customChannels, customEtag])
 
   const totalItems = useMemo(
     () => groups.reduce((n, group) => n + group.items.length, 0),
@@ -767,6 +951,15 @@ export function Admin() {
               <option key={id} value={id} />
             ))}
           </datalist>
+
+          <label className="admin__target">
+            <input
+              type="checkbox"
+              checked={liveOnly}
+              onChange={(e) => setLiveOnly(e.target.checked)}
+            />
+            Live only
+          </label>
         </div>
 
         <p className="admin__status" role="status" aria-live="polite">
@@ -776,6 +969,11 @@ export function Admin() {
               ? `${resultTotal} match${resultTotal === 1 ? '' : 'es'}, showing ${results.length}`
               : ''}
         </p>
+        {liveOnly && !searching && !liveFilterApplied && (
+          <p className="admin__hint">
+            The live filter is unavailable right now — showing every match instead.
+          </p>
+        )}
 
         <ul className="admin__results">
           {results.map((channel) => {
@@ -827,6 +1025,142 @@ export function Admin() {
             )
           })}
         </ul>
+      </section>
+
+      <section className="admin__panel" aria-labelledby="admin-custom-heading">
+        <h2 id="admin-custom-heading">Custom channels</h2>
+        <p className="admin__hint">
+          Channels outside the iptv-org list. The stream URL is not checked — you vouch for it.
+          Up to {MAX_CUSTOM_CHANNELS}, and they publish on the next sync without going through the
+          usual stream check (WO-21).
+        </p>
+
+        {customLoadError && <p className="admin__problem">{customLoadError}</p>}
+
+        {customStatus && (
+          <p className="admin__status" role="status" aria-live="polite">
+            {customStatus}
+          </p>
+        )}
+        {customErrors.length > 0 && (
+          <ul className="admin__errors" aria-label="Problems">
+            {customErrors.map((message) => (
+              <li key={message}>{message}</li>
+            ))}
+          </ul>
+        )}
+
+        <div className="admin__actions">
+          <button
+            className="admin__btn admin__btn--primary"
+            onClick={() => void saveCustomChannels()}
+            disabled={customSaving || !customDirty}
+          >
+            {customSaving ? 'Saving…' : 'Save custom channels'}
+          </button>
+          <button
+            className="admin__btn"
+            onClick={() => void loadCustomChannels()}
+            disabled={customSaving}
+          >
+            Discard and reload
+          </button>
+          {customDirty && <span className="admin__dirty">Unsaved changes</span>}
+        </div>
+
+        {customChannels.length === 0 && (
+          <p className="admin__empty">No custom channels yet. Add one below.</p>
+        )}
+
+        <ol className="admin__picks">
+          {customChannels.map((channel) => {
+            const published = channel.id ? (liveIds?.has(channel.id) ?? null) : false
+            return (
+              <li className="admin__pick" key={channel.localKey}>
+                <div className="admin__pick-main">
+                  <span className="admin__pick-name">{channel.name}</span>
+                  {channel.id ? (
+                    <code className="admin__pick-id">{channel.id}</code>
+                  ) : (
+                    <span className="admin__tag admin__tag--pending">not yet saved</span>
+                  )}
+                  {channel.country && <span className="admin__tag">{channel.country}</span>}
+                  {channel.id &&
+                    (published === null ? (
+                      <span className="admin__tag">generation unknown</span>
+                    ) : published ? (
+                      <span className="admin__tag admin__tag--live">in the live generation</span>
+                    ) : (
+                      <span className="admin__tag admin__tag--pending">pending until the next sync</span>
+                    ))}
+                </div>
+                <button
+                  className="admin__btn admin__btn--small"
+                  onClick={() => removeCustomChannel(channel.localKey)}
+                  aria-label={`Remove ${channel.name}`}
+                >
+                  Remove
+                </button>
+              </li>
+            )
+          })}
+        </ol>
+
+        <div className="admin__field-row">
+          <label className="admin__label" htmlFor="admin-custom-name">
+            Name
+          </label>
+          <input
+            id="admin-custom-name"
+            className="admin__input"
+            value={newChannelName}
+            maxLength={MAX_CUSTOM_NAME_CHARS}
+            placeholder="e.g. Community Radio TV"
+            onChange={(e) => setNewChannelName(e.target.value)}
+          />
+
+          <label className="admin__label" htmlFor="admin-custom-url">
+            Stream URL
+          </label>
+          <input
+            id="admin-custom-url"
+            className="admin__input"
+            value={newStreamUrl}
+            placeholder="https://example.com/stream.m3u8"
+            onChange={(e) => setNewStreamUrl(e.target.value)}
+          />
+
+          <label className="admin__label" htmlFor="admin-custom-icon">
+            Icon URL
+          </label>
+          <input
+            id="admin-custom-icon"
+            className="admin__input"
+            value={newIconUrl}
+            placeholder="Optional"
+            onChange={(e) => setNewIconUrl(e.target.value)}
+          />
+
+          <label className="admin__label" htmlFor="admin-custom-country">
+            Country
+          </label>
+          <input
+            id="admin-custom-country"
+            className="admin__input admin__input--short"
+            value={newCountry}
+            list="admin-countries"
+            placeholder="Optional"
+            onChange={(e) => setNewCountry(e.target.value)}
+          />
+
+          <button
+            className="admin__btn"
+            onClick={addCustomChannel}
+            disabled={!newChannelName.trim() || !newStreamUrl.trim() || customChannels.length >= MAX_CUSTOM_CHANNELS}
+          >
+            Add channel
+          </button>
+        </div>
       </section>
     </main>
   )

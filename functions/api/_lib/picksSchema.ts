@@ -67,7 +67,7 @@ const CHANNEL_ID_RE = /^[A-Za-z0-9][A-Za-z0-9._@-]*$/
  *
  * Every one of these is BMP, so a UTF-16 unit scan sees them whole.
  */
-function hasForbiddenChar(value: string): boolean {
+export function hasForbiddenChar(value: string): boolean {
   for (let i = 0; i < value.length; i += 1) {
     const code = value.charCodeAt(i)
     if (code < 0x20) return true
