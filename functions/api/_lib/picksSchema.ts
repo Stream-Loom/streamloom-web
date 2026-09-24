@@ -30,7 +30,15 @@ export const LIMITS = {
   bodyBytes: 64 * 1024,
   groups: 12,
   groupTitleChars: 60,
+  /** Applied to a group that does not set its own `limit` — including every group saved before that field existed. */
   itemsPerGroup: 50,
+  /**
+   * The widest a single group's own `limit` may go (owner request, 2026-09-24: let the admin
+   * size each list at creation instead of a fixed 50). Set to `totalItems` rather than a bigger
+   * number of its own: one group already can't hold more than the whole document allows, so a
+   * higher per-group ceiling would just be a limit nothing can ever reach.
+   */
+  itemsPerGroupCeiling: 200,
   /** Across all groups. This is also the cap on the probe-free pinned set (ADR-0033, WO-12). */
   totalItems: 200,
   noteChars: 140,
@@ -90,6 +98,13 @@ export interface PickItem {
 export interface PickGroup {
   title: string
   items: PickItem[]
+  /**
+   * How many items this group may hold, chosen by the admin when the group is created
+   * (owner request, 2026-09-24). Absent means the default, `LIMITS.itemsPerGroup` — the
+   * only value a group could ever have before this field existed, so an old document
+   * reads exactly as it always did.
+   */
+  limit?: number
 }
 
 /** What the portal sends. */
@@ -119,6 +134,7 @@ export interface StoredPickItem extends PickItem {
 export interface StoredPickGroup {
   title: string
   items: StoredPickItem[]
+  limit?: number
 }
 
 /** What is stored. */
@@ -190,7 +206,7 @@ export function validatePicksInput(raw: unknown): ValidationResult {
       push(`${where} must be an object`)
       return
     }
-    for (const key of unknownKeys(rawGroup, ['title', 'items'])) {
+    for (const key of unknownKeys(rawGroup, ['title', 'items', 'limit'])) {
       push(`${where}: unknown field "${key}"`)
     }
 
@@ -203,12 +219,30 @@ export function validatePicksInput(raw: unknown): ValidationResult {
       seenTitles.add(title.toLowerCase())
     }
 
+    // Absent means the default; present must be a sane integer, never trusted past that
+    // (the same posture as `rank` below) — a client-chosen ceiling still has a ceiling.
+    let limit: number | undefined
+    if (rawGroup.limit !== undefined) {
+      const rawLimit = rawGroup.limit
+      if (
+        typeof rawLimit !== 'number' ||
+        !Number.isInteger(rawLimit) ||
+        rawLimit < 1 ||
+        rawLimit > LIMITS.itemsPerGroupCeiling
+      ) {
+        push(`${where}.limit must be an integer 1-${LIMITS.itemsPerGroupCeiling}, or omitted`)
+      } else {
+        limit = rawLimit
+      }
+    }
+    const effectiveLimit = limit ?? LIMITS.itemsPerGroup
+
     if (!Array.isArray(rawGroup.items)) {
       push(`${where}.items must be an array`)
       return
     }
-    if (rawGroup.items.length > LIMITS.itemsPerGroup) {
-      push(`${where}.items: at most ${LIMITS.itemsPerGroup} items`)
+    if (rawGroup.items.length > effectiveLimit) {
+      push(`${where}.items: at most ${effectiveLimit} items`)
     }
 
     const items: PickItem[] = []
@@ -260,7 +294,7 @@ export function validatePicksInput(raw: unknown): ValidationResult {
       totalItems += 1
     })
 
-    groups.push({ title: title ?? '', items })
+    groups.push({ title: title ?? '', items, ...(limit !== undefined ? { limit } : {}) })
   })
 
   if (totalItems > LIMITS.totalItems) {

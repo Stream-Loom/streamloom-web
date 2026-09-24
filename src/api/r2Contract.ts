@@ -181,6 +181,8 @@ export interface PickItem {
 export interface PickGroup {
   title: string
   items: PickItem[]
+  /** How many items this group may hold, chosen by the admin when it was created. Absent means the portal's default. */
+  limit?: number
 }
 
 export interface PicksDocument {

@@ -551,6 +551,13 @@ test.describe('validation on save', () => {
       schema: 1,
       groups: [{ title: 'A', items: [{ channelId: 'Arte.fr' }, { channelId: 'Arte.fr' }] }],
     }],
+    ['a group limit that is not an integer', { schema: 1, groups: [{ title: 'A', items: [], limit: 1.5 }] }],
+    ['a group limit of zero', { schema: 1, groups: [{ title: 'A', items: [], limit: 0 }] }],
+    ['a group limit above the ceiling', { schema: 1, groups: [{ title: 'A', items: [], limit: 201 }] }],
+    ['a group with more items than its own limit', {
+      schema: 1,
+      groups: [{ title: 'A', limit: 1, items: [{ channelId: 'Arte.fr' }, { channelId: 'BBCNews.uk' }] }],
+    }],
   ]
 
   for (const [label, body] of badBodies) {
@@ -679,6 +686,57 @@ test.describe('validation on save', () => {
     })
     expect(res.status).toBe(503)
     expect((await res.json()).error).toBe('validation-unavailable')
+    expect(mutations).toEqual([])
+  })
+
+  test('a group without its own limit still caps at the default 50 (pre-existing behaviour)', async () => {
+    const { bucket, mutations } = makeBucket()
+    const items = Array.from({ length: 51 }, () => ({ channelId: 'Arte.fr' }))
+    const res = await call(
+      picksHandler,
+      writeRequest(await goodToken(), { schema: 1, groups: [{ title: 'A', items }] }),
+      { ...ENV_VARS, CATALOGUE_BUCKET: bucket },
+    )
+    expect(res.status).toBe(400)
+    expect((await res.json()).errors.join(' ')).toContain('at most 50 items')
+    expect(mutations).toEqual([])
+  })
+
+  test('a group with its own higher limit accepts more than 50 items, and the limit is stored', async () => {
+    const { bucket, objects } = makeBucket()
+    const items = [{ channelId: 'Arte.fr' }, { channelId: 'BBCNews.uk' }]
+    const res = await call(
+      picksHandler,
+      writeRequest(await goodToken(), { schema: 1, groups: [{ title: 'A', limit: 75, items }] }),
+      { ...ENV_VARS, CATALOGUE_BUCKET: bucket },
+    )
+    expect(res.status).toBe(200)
+    const stored = JSON.parse(objects.get('catalogue/picks.json')!.body)
+    expect(stored.groups[0].limit).toBe(75)
+  })
+
+  test('a limit exactly at the ceiling (200) is accepted', async () => {
+    const { bucket, objects } = makeBucket()
+    const res = await call(
+      picksHandler,
+      writeRequest(await goodToken(), { schema: 1, groups: [{ title: 'A', limit: 200, items: [] }] }),
+      { ...ENV_VARS, CATALOGUE_BUCKET: bucket },
+    )
+    expect(res.status).toBe(200)
+    const stored = JSON.parse(objects.get('catalogue/picks.json')!.body)
+    expect(stored.groups[0].limit).toBe(200)
+  })
+
+  test('a group deliberately shrunk below the old default of 50 still enforces its own, smaller limit', async () => {
+    const { bucket, mutations } = makeBucket()
+    const items = [{ channelId: 'Arte.fr' }, { channelId: 'BBCNews.uk' }]
+    const res = await call(
+      picksHandler,
+      writeRequest(await goodToken(), { schema: 1, groups: [{ title: 'A', limit: 1, items }] }),
+      { ...ENV_VARS, CATALOGUE_BUCKET: bucket },
+    )
+    expect(res.status).toBe(400)
+    expect((await res.json()).errors.join(' ')).toContain('at most 1 items')
     expect(mutations).toEqual([])
   })
 })

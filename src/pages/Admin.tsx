@@ -50,7 +50,10 @@ const SEARCH_DEBOUNCE_MS = 250
 
 /** Same ceilings the Function enforces; mirrored so the UI can stop before a 400. */
 const MAX_GROUPS = 12
-const MAX_ITEMS_PER_GROUP = 50
+/** Applied to a group whose own limit hasn't been set — the value every group used before this existed. */
+const DEFAULT_ITEMS_PER_GROUP = 50
+/** Widest a single group's own limit may go (owner request, 2026-09-24: let the admin size each list). */
+const MAX_ITEMS_PER_GROUP_CEILING = 200
 const MAX_TOTAL_ITEMS = 200
 const MAX_NOTE_CHARS = 140
 const MAX_TITLE_CHARS = 60
@@ -170,6 +173,7 @@ export function Admin() {
 
   const [targetGroup, setTargetGroup] = useState(0)
   const [newGroupTitle, setNewGroupTitle] = useState('')
+  const [newGroupLimit, setNewGroupLimit] = useState(DEFAULT_ITEMS_PER_GROUP)
 
   const [status, setStatus] = useState<string>('')
   const [warnings, setWarnings] = useState<string[]>([])
@@ -513,11 +517,22 @@ export function Admin() {
       setErrors([`There is already a group called "${title}".`])
       return
     }
+    const limit = Math.min(Math.max(Math.trunc(newGroupLimit) || 1, 1), MAX_ITEMS_PER_GROUP_CEILING)
     setErrors([])
-    mutate([...groups, { title, items: [] }])
+    mutate([...groups, { title, items: [], limit }])
     setTargetGroup(groups.length)
     setNewGroupTitle('')
-  }, [groups, mutate, newGroupTitle])
+    setNewGroupLimit(DEFAULT_ITEMS_PER_GROUP)
+  }, [groups, mutate, newGroupTitle, newGroupLimit])
+
+  /** A list's limit can be raised or lowered after creation too — a typo at creation is not a dead end. */
+  const setGroupLimit = useCallback(
+    (index: number, limit: number) => {
+      const clamped = Math.min(Math.max(Math.trunc(limit) || 1, 1), MAX_ITEMS_PER_GROUP_CEILING)
+      mutate(groups.map((g, i) => (i === index ? { ...g, limit: clamped } : g)))
+    },
+    [groups, mutate],
+  )
 
   const removeGroup = useCallback(
     (index: number) => {
@@ -548,8 +563,9 @@ export function Admin() {
         return
       }
       if (group.items.some((item) => item.channelId === channel.id)) return
-      if (group.items.length >= MAX_ITEMS_PER_GROUP) {
-        setErrors([`"${group.title}" already has the maximum of ${MAX_ITEMS_PER_GROUP} channels.`])
+      const groupLimit = group.limit ?? DEFAULT_ITEMS_PER_GROUP
+      if (group.items.length >= groupLimit) {
+        setErrors([`"${group.title}" already has the maximum of ${groupLimit} channels.`])
         return
       }
       if (totalItems >= MAX_TOTAL_ITEMS) {
@@ -625,6 +641,7 @@ export function Admin() {
         schema: PICKS_SCHEMA,
         groups: groups.map((group) => ({
           title: group.title,
+          ...(group.limit !== undefined ? { limit: group.limit } : {}),
           items: group.items.map((item, index) => ({
             channelId: item.channelId,
             ...(item.note ? { note: item.note } : {}),
@@ -772,6 +789,10 @@ export function Admin() {
 
       <section className="admin__panel" aria-labelledby="admin-groups-heading">
         <h2 id="admin-groups-heading">Groups</h2>
+        <p className="admin__hint">
+          Each group's channel limit defaults to {DEFAULT_ITEMS_PER_GROUP} and can be set up to{' '}
+          {MAX_ITEMS_PER_GROUP_CEILING} — at creation, or any time after from the group's own "Limit" field.
+        </p>
 
         <div className="admin__field-row">
           <label className="admin__label" htmlFor="admin-new-group">
@@ -784,6 +805,18 @@ export function Admin() {
             maxLength={MAX_TITLE_CHARS}
             placeholder="e.g. News, Sport, Late night"
             onChange={(e) => setNewGroupTitle(e.target.value)}
+          />
+          <label className="admin__label" htmlFor="admin-new-group-limit">
+            Channel limit
+          </label>
+          <input
+            id="admin-new-group-limit"
+            className="admin__input admin__input--short"
+            type="number"
+            min={1}
+            max={MAX_ITEMS_PER_GROUP_CEILING}
+            value={newGroupLimit}
+            onChange={(e) => setNewGroupLimit(Number(e.target.value))}
           />
           <button
             className="admin__btn"
@@ -800,7 +833,21 @@ export function Admin() {
           <article className="admin__group" key={group.title}>
             <header className="admin__group-head">
               <h3>{group.title}</h3>
-              <span className="admin__pill">{group.items.length}</span>
+              <span className="admin__pill">
+                {group.items.length} / {group.limit ?? DEFAULT_ITEMS_PER_GROUP}
+              </span>
+              <label className="admin__target">
+                Limit
+                <input
+                  className="admin__input admin__input--short"
+                  type="number"
+                  min={1}
+                  max={MAX_ITEMS_PER_GROUP_CEILING}
+                  value={group.limit ?? DEFAULT_ITEMS_PER_GROUP}
+                  aria-label={`Channel limit for ${group.title}`}
+                  onChange={(e) => setGroupLimit(groupIndex, Number(e.target.value))}
+                />
+              </label>
               <button
                 className="admin__btn admin__btn--small"
                 onClick={() => moveGroup(groupIndex, -1)}

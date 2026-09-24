@@ -89,6 +89,7 @@ function snapshotGroups(
 ): StoredPickGroup[] {
   return groups.map((group) => ({
     title: group.title,
+    ...(group.limit !== undefined ? { limit: group.limit } : {}),
     items: group.items.map((item) => {
       const snapshot = snapshotById.get(item.channelId)
       return snapshot
