@@ -101,12 +101,12 @@
   display: inline-block;
 }
 
-/* Mobile Bottom Navigation Bar (< 768px) */
+/* Mobile Bottom Navigation Bar (below medium — see src/styles/breakpoints.css) */
 .mobile-nav {
   display: none;
 }
 
-@media (max-width: 767px) {
+@media (max-width: 839px) {
   .navbar__links {
     display: none;
   }

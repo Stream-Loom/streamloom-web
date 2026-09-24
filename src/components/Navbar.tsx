@@ -56,7 +56,7 @@ export function Navbar() {
         </div>
       </nav>
 
-      {/* Mobile Bottom Navigation Bar (< 768px) */}
+      {/* Mobile Bottom Navigation Bar (below medium — see src/styles/breakpoints.css) */}
       <nav className="mobile-nav glass" role="navigation" aria-label="Mobile navigation">
         <NavLink
           to="/"

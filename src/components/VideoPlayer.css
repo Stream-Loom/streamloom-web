@@ -649,8 +649,9 @@
   opacity: 1;
 }
 
-/* Responsive Player Controls */
-@media (max-width: 768px) {
+/* Responsive Player Controls — shared 600/840/1200 scale, see
+   src/styles/breakpoints.css. */
+@media (max-width: 839px) {
   .player__hud {
     padding: 10px 14px;
   }

@@ -3,6 +3,8 @@
    Dark, glassmorphism, Apple TV-inspired
    ============================================================ */
 
+@import './breakpoints.css';
+
 /*
  * Font loading is intentionally non-blocking: Inter is served via a
  * print-media stylesheet swap in index.html so first paint renders with
@@ -185,7 +187,9 @@ ul, ol { list-style: none; }
   min-height: 100dvh;
 }
 
-@media (max-width: 767px) {
+/* Must match Navbar.css's mobile-nav switch point — shared 600/840/1200
+   scale, see src/styles/breakpoints.css. */
+@media (max-width: 839px) {
   .page-wrapper {
     padding-bottom: calc(var(--mobile-tab-height) + var(--sab) + 24px);
   }

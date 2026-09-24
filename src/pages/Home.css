@@ -304,6 +304,7 @@
 }
 
 .home-search-results__grid {
+  container-type: inline-size;
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(170px, 1fr));
   gap: var(--space-lg);
@@ -384,14 +385,11 @@
   width: 100%;
 }
 
-/* Responsive */
-@media (max-width: 900px) {
-  .home-quick-filters .filter-select-wrap {
-    display: none;
-  }
-}
-
-@media (max-width: 768px) {
+/* Responsive — shared 600/840/1200 scale, see src/styles/breakpoints.css.
+   The 900px rule that used to hide the country/quality selects below
+   .home-quick-filters is gone: those selects stay reachable at every
+   width now that .home-filters-row itself stacks below medium. */
+@media (max-width: 839px) {
   .home-toolbar {
     gap: 10px;
   }
@@ -405,14 +403,18 @@
   .home-quick-filters {
     display: none;
   }
+}
 
+/* Card count in the search grid follows the grid's own width, not the
+   viewport's — it stays correct once this grid sits in a narrower pane. */
+@container (max-width: 839px) {
   .home-search-results__grid {
     grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
     gap: 12px;
   }
 }
 
-@media (max-width: 480px) {
+@container (max-width: 599px) {
   .home-search-results__grid {
     grid-template-columns: repeat(2, 1fr);
     gap: 10px;

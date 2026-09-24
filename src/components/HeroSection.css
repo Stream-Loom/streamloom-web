@@ -171,8 +171,9 @@
   background: var(--accent);
 }
 
-/* Responsive adjustments */
-@media (max-width: 640px) {
+/* Responsive adjustments — shared 600/840/1200 scale, see
+   src/styles/breakpoints.css. */
+@media (max-width: 599px) {
   .hero {
     height: clamp(260px, 38vh, 380px);
     border-radius: var(--radius-lg);

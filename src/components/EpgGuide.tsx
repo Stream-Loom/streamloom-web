@@ -22,6 +22,7 @@ import type { GuideFilters } from '../util/epgFilter'
 import { EpgToolbar } from './EpgToolbar'
 import { EpgTimeline } from './EpgTimeline'
 import { EpgRow } from './EpgRow'
+import { COMPACT_MAX, MEDIUM_MAX } from '../styles/breakpoints'
 import './EpgGuide.css'
 
 interface Props {
@@ -272,8 +273,8 @@ function channelCoverage(channelIds: string[]): { earliestEnd: number; latestEnd
 }
 
 function guideMetricsFor(viewportWidth: number): { sidebar: number; rowHeight: number } {
-  if (viewportWidth <= 480) return { sidebar: 104, rowHeight: 52 }
-  if (viewportWidth <= 768) return { sidebar: 132, rowHeight: 56 }
+  if (viewportWidth <= COMPACT_MAX) return { sidebar: 104, rowHeight: 52 }
+  if (viewportWidth <= MEDIUM_MAX) return { sidebar: 132, rowHeight: 56 }
   return { sidebar: SIDEBAR_WIDTH, rowHeight: ROW_HEIGHT }
 }
 
