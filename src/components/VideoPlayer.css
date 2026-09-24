@@ -14,6 +14,29 @@
   cursor: pointer;
 }
 
+/* B9: an inert marker left in the video's normal spot while it's moved into the
+   Document PiP window, so it can be reinserted in the same position on close. */
+.player__video-host {
+  display: none;
+}
+
+.player__pip-placeholder {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 16px;
+  background: #000;
+  color: #fff;
+  /* Above .player__state-overlay (z-index 5): the relocated stream can still
+     buffer or error while the mini-player is open, and this placeholder — the
+     only thing here that says where the video went and how to get it back —
+     must not end up buried under that overlay. */
+  z-index: 6;
+}
+
 /* Overlays (Buffering & Error) */
 .player__toast {
   position: absolute;
@@ -859,4 +882,59 @@
   flex-shrink: 0;
   font-size: 0.72rem;
   color: var(--text-muted);
+}
+
+/* B9: zap controls rendered inside the Document PiP window itself (not this page —
+   this stylesheet is copied into that window's <head> so these rules apply there). */
+.player__pip-controls {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 44px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 8px;
+  background: rgba(15, 15, 20, 0.92);
+  color: #fff;
+  font-family: inherit;
+}
+
+.player__pip-controls button {
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  background: rgba(255, 255, 255, 0.12);
+  color: #fff;
+  font-size: 13px;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+.player__pip-controls button:disabled {
+  opacity: 0.38;
+  cursor: default;
+}
+
+.player__pip-controls-info {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.player__pip-controls-info img {
+  border-radius: 4px;
+  flex-shrink: 0;
+}
+
+.player__pip-controls-info span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
