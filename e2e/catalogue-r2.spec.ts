@@ -343,13 +343,61 @@ test.describe('R2 first, then Redis', () => {
     expect(r2.count('meta')).toBe(1)
     expect(redis.count('channels')).toBe(6)
     expect(redis.count('streams')).toBe(9)
-    // Schedules follow the generation that was loaded, not the one R2 named.
+    // Schedules follow the generation that was loaded, not the one R2 named. A
+    // schedule can still be *tried* on R2 first (isSnapshotChannelId, source
+    // unresolved) before falling through, so the invariant is checked on
+    // whichever store actually answered, not on redis alone.
     await page.goto('/guide')
     await expect
       .poll(() => page.locator('.epg-guide__program').count(), { timeout: 60_000 })
       .toBeGreaterThan(0)
-    expect(redis.requests.some((r) => r.kind === 'schedule' && r.key.startsWith(`catalogue:g${REDIS_GENERATION}:`))).toBe(true)
-    expect(redis.requests.some((r) => r.kind === 'schedule' && r.key.startsWith(`catalogue:g${DEFAULT_GENERATION}:`))).toBe(false)
+    const scheduleRequests = [
+      ...redis.requests.filter((r) => r.kind === 'schedule').map((r) => r.key),
+      ...r2.requests.filter((r) => r.kind === 'schedule').map((r) => r.path),
+    ]
+    expect(scheduleRequests.length).toBeGreaterThan(0)
+    expect(scheduleRequests.every((k) => k.includes(`g${REDIS_GENERATION}`))).toBe(true)
+    expect(scheduleRequests.some((k) => k.includes(`g${DEFAULT_GENERATION}`))).toBe(false)
+  })
+
+  test('reopening the guide on a reload never mixes the cached generation with a background refresh', async ({
+    page,
+    context,
+  }) => {
+    // Same fallback as above, but this time the guide is opened on a *fresh page
+    // load* that already has the Redis generation cached in IndexedDB. That load
+    // renders the cached catalogue immediately while a background refresh reads
+    // R2's meta.json (naming the newer, still-unreadable generation) before its
+    // own fallback to Redis resolves. Schedules must still follow the generation
+    // actually on screen, not whichever one the background refresh's pointer read
+    // named in that window.
+    const redis = await installUpstashMock(context, { generation: REDIS_GENERATION })
+    r2.fail('streams', 'status')
+    await page.goto('/')
+    await waitForChannels(page)
+    await catalogueStoredAs(page, REDIS_GENERATION)
+    await settle(page, redis)
+
+    redis.reset()
+    r2.resetRequests()
+
+    await page.goto('/guide')
+    await expect
+      .poll(() => page.locator('.epg-guide__program').count(), { timeout: 60_000 })
+      .toBeGreaterThan(0)
+    await settle(page, redis)
+
+    // Whichever store actually answers a schedule request (R2 will still be tried
+    // first when the ambient store-selection pointer hasn't caught up yet), the
+    // generation named in every one of those requests must be the one on screen,
+    // never the newer one the background refresh's meta read is chasing.
+    const scheduleRequests = [
+      ...redis.requests.filter((r) => r.kind === 'schedule').map((r) => r.key),
+      ...r2.requests.filter((r) => r.kind === 'schedule').map((r) => r.path),
+    ]
+    expect(scheduleRequests.length).toBeGreaterThan(0)
+    expect(scheduleRequests.every((k) => k.includes(`g${REDIS_GENERATION}`))).toBe(true)
+    expect(scheduleRequests.some((k) => k.includes(`g${DEFAULT_GENERATION}`))).toBe(false)
   })
 
   for (const [label, fault] of [

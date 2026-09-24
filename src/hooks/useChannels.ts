@@ -47,6 +47,8 @@ interface UseChannelsResult {
   refreshEpg: () => Promise<void>
   /** Where catalogue data was last loaded from */
   source: CatalogueSource | 'cache' | null
+  /** Generation the held catalogue (`channels`, `epgChannelIds`) actually is; null before the first load. */
+  generation: number | null
 }
 
 interface CatalogueLoad {
@@ -160,7 +162,7 @@ async function loadOnMainThread(meta: CatalogueGeneration): Promise<CatalogueLoa
       epgIds: null,
     }
   }
-  const epgIds = await fetchEpgIds()
+  const epgIds = await fetchEpgIds(catalogue.generation)
   return {
     generation: catalogue.generation,
     source: catalogue.source,
@@ -325,8 +327,8 @@ async function loadData(force = false) {
  * the held copy has none (an earlier read of it failed), which is worth one GET.
  */
 async function confirmUnchangedCatalogue() {
-  if ((_epgIds?.size ?? 0) === 0) {
-    const ids = await fetchEpgIds()
+  if ((_epgIds?.size ?? 0) === 0 && _generation !== null) {
+    const ids = await fetchEpgIds(_generation)
     if (ids && ids.length > 0) {
       _epgIds = new Set(ids)
       _epgAvailable = true
@@ -350,7 +352,7 @@ let _epgRefresh: Promise<void> | null = null
 function refreshEpgIds(): Promise<void> {
   if (_epgRefresh) return _epgRefresh
   _epgRefresh = (async () => {
-    const ids = await fetchEpgIds(true)
+    const ids = await fetchEpgIds(undefined, true)
     if (ids && ids.length > 0) {
       _epgIds = new Set(ids)
       _epgAvailable = true
@@ -492,6 +494,7 @@ export function useChannels(): UseChannelsResult {
     epgAvailable: _epgAvailable,
     refreshEpg,
     source: _source,
+    generation: _generation,
   }
 }
 
@@ -516,17 +519,29 @@ const _epgCache = new Map<string, EpgProgram[]>()
 export function useEpg(channelId: string | null) {
   const [fetchedPrograms, setFetchedPrograms] = useState<{ [id: string]: EpgProgram[] }>({})
   const [loading, setLoading] = useState(false)
+  const [tick, setTick] = useState(0)
 
   const programs = channelId ? (_epgCache.get(channelId) ?? fetchedPrograms[channelId] ?? []) : []
 
+  // `_generation` is module state, not React state, so a mount that lands before
+  // the catalogue has one (e.g. an IndexedDB record from before generations were
+  // stored, still being replaced by a background reload) would otherwise never
+  // retry: `[channelId]` alone doesn't see it change. Subscribing to the same
+  // notifications `useChannels` uses re-checks it whenever the catalogue changes.
   useEffect(() => {
-    if (!channelId || _epgCache.has(channelId)) return
+    const rerender = () => setTick((t) => t + 1)
+    _listeners.add(rerender)
+    return () => { _listeners.delete(rerender) }
+  }, [])
+
+  useEffect(() => {
+    if (!channelId || _epgCache.has(channelId) || _generation === null) return
 
     let cancelled = false
     Promise.resolve().then(() => {
       if (!cancelled) setLoading(true)
     })
-    loadSchedule(channelId)
+    loadSchedule(channelId, _generation)
       .then((data) => {
         if (!cancelled) {
           _epgCache.set(channelId, data)
@@ -541,7 +556,7 @@ export function useEpg(channelId: string | null) {
     return () => {
       cancelled = true
     }
-  }, [channelId])
+  }, [channelId, tick])
 
   return { programs, loading }
 }

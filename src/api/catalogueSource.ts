@@ -142,19 +142,35 @@ async function resolvePin(fresh: boolean) {
 }
 
 /**
- * Channel ids that have a schedule, for the pinned generation.
+ * Channel ids that have a schedule, for `generation` when given, otherwise for
+ * whatever generation is currently pinned (`fresh` re-reads the pointer first).
+ *
+ * `_pin` is shared, module-level state: a concurrent load elsewhere can repin it
+ * between a caller's own catalogue read and this call. Passing the caller's own
+ * `generation` (as `fetchEpg` already requires) keeps the ids tied to the same
+ * generation as the catalogue that caller is holding, instead of whatever the
+ * pointer says right now.
  *
  * Null when the list could not be read (missing, unreachable or malformed), so
  * callers can tell "schedules unavailable" from a list that is legitimately empty.
  */
-export async function fetchEpgIds(fresh = false): Promise<string[] | null> {
-  const pin = await resolvePin(fresh)
-  if (!pin) return null
-  if (pin.source === 'r2') {
-    const ids = await r2.fetchEpgIdsFromR2(pin.generation)
+export async function fetchEpgIds(generation?: number, fresh = false): Promise<string[] | null> {
+  let gen: number
+  let source: CatalogueSource
+  if (generation !== undefined) {
+    gen = generation
+    source = _pin && _pin.generation === generation ? _pin.source : 'r2'
+  } else {
+    const pin = await resolvePin(fresh)
+    if (!pin) return null
+    gen = pin.generation
+    source = pin.source
+  }
+  if (source === 'r2') {
+    const ids = await r2.fetchEpgIdsFromR2(gen)
     if (ids) return ids
   }
-  return redis.fetchEpgIdsFromRedis(false, pin.generation)
+  return redis.fetchEpgIdsFromRedis(false, gen)
 }
 
 /**

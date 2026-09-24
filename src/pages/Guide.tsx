@@ -36,7 +36,7 @@ function readInitialState(): GuideFilterState {
 }
 
 export function Guide() {
-  const { channels, categories, epgChannelIds, epgAvailable, refreshEpg, loading } = useChannels()
+  const { channels, categories, epgChannelIds, epgAvailable, refreshEpg, loading, generation } = useChannels()
   const { favouriteIds } = useFavourites()
   const [state, setState] = useState<GuideFilterState>(readInitialState)
 
@@ -131,6 +131,7 @@ export function Guide() {
           channels={channels}
           categories={categories}
           epgChannelIds={guideIds}
+          generation={generation}
           filters={filters}
           matchSet={matchSet}
           schedulesUnavailable={schedulesUnavailable}

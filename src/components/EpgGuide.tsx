@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import type { Category, EnrichedChannel, EpgProgram } from '../api/types'
-import { fetchEpg, resolveGeneration } from '../api/catalogueSource'
+import { fetchEpg } from '../api/catalogueSource'
 import { persistSchedules, readPersistedSchedules } from '../util/scheduleLoader'
 import {
   PIXELS_PER_MINUTE,
@@ -27,6 +27,8 @@ interface Props {
   channels: EnrichedChannel[]
   categories: Category[]
   epgChannelIds: Set<string>
+  /** Generation `channels` and `epgChannelIds` actually are; null before the first load. */
+  generation: number | null
   filters: GuideFilters
   /**
    * Pre-resolved set of channel ids matching the current search query, or
@@ -151,15 +153,26 @@ interface PrefetchPass {
  * Loads schedules for `ids`: from IndexedDB where stored, otherwise from the network at
  * most FETCH_CONCURRENCY at a time, then stores what it returned.
  *
+ * `generation` is the caller's own held generation (`useChannels`' `generation`,
+ * the same one `channels` and `epgChannelIds` are already for), not re-resolved
+ * here: the catalogue pointer can move on in the background (a refresh, another
+ * tab's load) between when this view's catalogue loaded and when it scrolls, and
+ * reading the pointer fresh at that point would fetch schedules for a generation
+ * other than the one actually on screen.
+ *
  * Notifications are coalesced per animation frame: a screenful of schedules
  * arrives as dozens of separate awaits, and repainting per channel would cost
  * one render each instead of one render for the whole wave.
  */
-async function prefetchEpg(ids: string[], onLoaded: () => void, pass: PrefetchPass) {
-  const generation = await resolveGeneration()
+async function prefetchEpg(
+  ids: string[],
+  generation: number | null,
+  onLoaded: () => void,
+  pass: PrefetchPass,
+) {
   if (generation === null) {
-    // The generation pointer could not be read, so no schedule can be. Cool the
-    // rows down rather than re-reading the pointer on every scroll step.
+    // No catalogue is held yet, so no schedule can be. Cool the rows down
+    // rather than fetching for a generation the view isn't showing.
     for (const id of ids) emptyRetryAt.set(id, Date.now() + EMPTY_RETRY_MS)
     return
   }
@@ -267,6 +280,7 @@ export function EpgGuide({
   channels,
   categories,
   epgChannelIds,
+  generation,
   filters,
   matchSet,
   schedulesUnavailable = false,
@@ -374,14 +388,14 @@ export function EpgGuide({
     const delay = hasPrefetchedRef.current ? PREFETCH_SETTLE_MS : 0
     const timer = setTimeout(() => {
       hasPrefetchedRef.current = true
-      void prefetchEpg(ids, bumpCache, pass)
+      void prefetchEpg(ids, generation, bumpCache, pass)
     }, delay)
     return () => {
       clearTimeout(timer)
       pass.cancelled = true
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps -- keyed on the id set and row window
-  }, [guideKey, prefetchFirst, prefetchLast, bumpCache, schedulesUnavailable])
+  }, [guideKey, prefetchFirst, prefetchLast, bumpCache, schedulesUnavailable, generation])
 
   // Vertical virtualization: only rows intersecting the viewport are rendered.
   const totalHeight = guideChannels.length * rowHeight

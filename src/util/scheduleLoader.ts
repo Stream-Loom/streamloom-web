@@ -7,7 +7,7 @@
  * is what makes them safe to reuse: a generation is immutable.
  */
 
-import { fetchEpg, resolveGeneration } from '../api/catalogueSource'
+import { fetchEpg } from '../api/catalogueSource'
 import type { EpgProgram } from '../api/types'
 import { readStoredSchedules, writeStoredSchedules } from './catalogueStore'
 
@@ -31,13 +31,15 @@ export function persistSchedules(
 }
 
 /**
- * One channel's schedule: stored copy first, the network on a miss (then stored).
- * Resolves to an empty list when the schedule cannot be read.
+ * One channel's schedule for `generation`: stored copy first, the network on a
+ * miss (then stored). Resolves to an empty list when the schedule cannot be read.
+ *
+ * `generation` is the caller's own held generation, not re-resolved here: the
+ * module-level catalogue pointer can move on between when a view loaded its
+ * catalogue and when it asks for a schedule, and reading it fresh at that point
+ * would fetch a schedule for a generation other than the one on screen.
  */
-export async function loadSchedule(channelId: string): Promise<EpgProgram[]> {
-  const generation = await resolveGeneration()
-  if (generation === null) return []
-
+export async function loadSchedule(channelId: string, generation: number): Promise<EpgProgram[]> {
   const stored = await readPersistedSchedules(generation, [channelId])
   const hit = stored.get(channelId)
   if (hit) return hit

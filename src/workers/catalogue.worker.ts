@@ -75,7 +75,7 @@ ctx.onmessage = async (event: MessageEvent<CatalogueWorkerRequest>) => {
       return
     }
 
-    const epgIds = await fetchEpgIds()
+    const epgIds = await fetchEpgIds(catalogue.generation)
     const channels = enrichChannels(catalogue.channels, catalogue.streams, working)
     const searchIndex = buildSearchIndex(channels)
 
