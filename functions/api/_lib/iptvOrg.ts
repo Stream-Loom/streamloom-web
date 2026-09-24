@@ -259,6 +259,11 @@ export interface SearchQuery {
   country?: string
   category?: string
   limit: number
+  /**
+   * When given, only channels in this set are matched at all — narrows to the live generation
+   * (WO-21). Absent means unfiltered, the behaviour before this existed.
+   */
+  liveIds?: ReadonlySet<string>
 }
 
 export interface SearchResponse {
@@ -281,6 +286,7 @@ export function searchChannels(index: IptvIndex, query: SearchQuery): SearchResp
   let total = 0
 
   for (const channel of index.all) {
+    if (query.liveIds && !query.liveIds.has(channel.id)) continue
     if (country && channel.country !== country) continue
     if (category && !channel.categories.includes(category)) continue
     if (text && !channel.name.toLowerCase().includes(text) && !channel.id.toLowerCase().includes(text)) {

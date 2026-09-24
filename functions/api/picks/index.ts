@@ -30,7 +30,9 @@
  *      form post cannot produce without that preflight.
  */
 
-import { authoriseAccessRequest, type AccessFailure } from '../_lib/accessJwt'
+import { authoriseAccessRequest } from '../_lib/accessJwt'
+import { bindBucket, type CatalogueBucket } from '../_lib/catalogueBucket'
+import { bareEtag, json, readStoredJson, refuse, stripWeak } from '../_lib/httpJson'
 import { indexAgeMinutes, isIndexStale, judgeChannel, loadIptvIndex, type IptvChannel } from '../_lib/iptvOrg'
 import { dispatchFastTrack } from '../_lib/fastTrack'
 import {
@@ -66,113 +68,10 @@ const HISTORY_SUFFIX_TRIES = 5
  */
 const BUCKET_PROOF_KEY = 'catalogue/meta.json'
 
-interface R2Object {
-  httpEtag: string
-  size?: number
-  json: <T>() => Promise<T>
-  text: () => Promise<string>
-}
-
-interface PutOptions {
-  httpMetadata?: { contentType?: string; cacheControl?: string }
-  onlyIf?: { etagMatches?: string; etagDoesNotMatch?: string }
-}
-
-/**
- * Read-and-append surface of the catalogue bucket.
- *
- * There is deliberately no `delete`. That used to be a type-only claim, which a
- * compiled Function does not enforce: `(bucket as any).delete(...)` would have
- * run. `bindBucket` below now returns a facade holding only these three methods,
- * so the underlying binding's `delete` is not reachable from this module at
- * runtime either (backend CLAUDE.md, "retire by flag, never delete").
- */
-interface CatalogueBucket {
-  get: (key: string) => Promise<R2Object | null>
-  head: (key: string) => Promise<{ key: string } | null>
-  put: (key: string, value: string, options?: PutOptions) => Promise<{ httpEtag: string } | null>
-}
-
-const json = (body: unknown, status: number, headers: Record<string, string> = {}): Response =>
-  new Response(JSON.stringify(body), {
-    status,
-    headers: {
-      'Content-Type': 'application/json; charset=utf-8',
-      // The editor must never be served a stale document, and no cache anywhere
-      // should hold a copy of an authenticated response.
-      'Cache-Control': 'no-store',
-      'X-Content-Type-Options': 'nosniff',
-      ...headers,
-    },
-  })
-
-/**
- * Turns an authorisation failure into a response.
- *
- * The body is deliberately generic. Everyone who reaches this branch is
- * *unauthenticated* — they have not proved they are the owner — so they are told
- * only that the request was refused, never which check refused it, which
- * environment variable is missing, or that the project runs on Pages at all. The
- * precise reason goes to the log, where the owner can read it and a stranger
- * cannot; the setup guidance lives in README.md.
- */
-function refuse(failure: AccessFailure): Response {
-  console.warn(`[picks] request refused: ${failure.status} ${failure.reason}`)
-  if (failure.status === 503) return json({ error: 'unavailable' }, 503)
-  return json({ error: 'unauthorised' }, failure.status)
-}
-
-/** `W/"abc"` and `"abc"` name the same object; compare them the same way. */
-const stripWeak = (etag: string): string => etag.replace(/^W\//, '').trim()
-
-/**
- * The bare hash inside an ETag: no weak marker, no surrounding quotes.
- *
- * `stripWeak` above is for comparing two *header-shaped* values to each other
- * (the client's `If-Match` against the stored `httpEtag`), where both sides
- * carry quotes and the comparison is unaffected either way. R2's own
- * `onlyIf.etagMatches`/`etagDoesNotMatch`, passed straight to the binding
- * rather than compared here, is not header-shaped: it throws `TypeError:
- * Conditional ETag should not be wrapped in quotes` if given the quoted form
- * (found live, 2026-09-22 — every save after the first one hit this, because
- * only a second save has a `current` object to build `onlyIf` from at all).
- */
-const bareEtag = (etag: string): string => stripWeak(etag).replace(/^"|"$/g, '')
-
-/**
- * A three-method facade over the `CATALOGUE_BUCKET` binding, or null.
- *
- * Two jobs:
- *
- *  1. **Check it is a binding at all.** A truthiness test passes for a plain
- *     environment *variable* of the same name — a string the owner typed into
- *     "Variables and Secrets" instead of adding under "Bindings" — and the route
- *     would then throw on `.get` and answer 500. Requiring the three methods
- *     turns that into the 503 it should be.
- *  2. **Drop `delete`.** The returned object holds only `get`, `head` and `put`,
- *     so nothing in this module can reach the binding's `delete`, whatever a
- *     later edit or a cast tries.
- */
-export function bindBucket(env: unknown): CatalogueBucket | null {
-  const raw = (env as { CATALOGUE_BUCKET?: unknown } | undefined)?.CATALOGUE_BUCKET
-  if (typeof raw !== 'object' || raw === null) return null
-
-  const source = raw as Record<string, unknown>
-  const { get, head, put } = source
-  if (typeof get !== 'function' || typeof head !== 'function' || typeof put !== 'function') return null
-
-  return {
-    get: (key) => (get as (k: string) => Promise<R2Object | null>).call(source, key),
-    head: (key) => (head as (k: string) => Promise<{ key: string } | null>).call(source, key),
-    put: (key, value, options) =>
-      (put as (k: string, v: string, o?: PutOptions) => Promise<{ httpEtag: string } | null>).call(
-        source,
-        key,
-        value,
-        options,
-      ),
-  }
-}
+// `bindBucket` moved to `_lib/catalogueBucket.ts` (WO-21) once `picks/custom-channels.ts` needed
+// the same facade; re-exported here so this route's own tests, which import it from this module,
+// keep working unchanged.
+export { bindBucket }
 
 /**
  * Attaches each item's iptv-org identity snapshot, from `snapshotById` (ADR-0042).
@@ -199,24 +98,13 @@ function snapshotGroups(
   }))
 }
 
-/** The stored document, or null when the object is absent or unreadable. */
-async function readStored(object: R2Object): Promise<PicksDocument | null> {
-  try {
-    const value = (await object.json()) as unknown
-    if (typeof value !== 'object' || value === null || Array.isArray(value)) return null
-    return value as PicksDocument
-  } catch {
-    return null
-  }
-}
-
 async function handleGet(bucket: CatalogueBucket): Promise<Response> {
   const object = await bucket.get(PICKS_KEY)
   if (!object) {
     // Not an error: nothing has been published yet. The editor starts empty.
     return json({ picks: null, etag: null, limits: LIMITS, schema: PICKS_SCHEMA }, 200)
   }
-  const picks = await readStored(object)
+  const picks = await readStoredJson<PicksDocument>(object)
   return json(
     { picks, etag: object.httpEtag, limits: LIMITS, schema: PICKS_SCHEMA },
     200,
@@ -232,7 +120,7 @@ async function conflict(bucket: CatalogueBucket, message: string): Promise<Respo
       error: 'conflict',
       detail: message,
       etag: current?.httpEtag ?? null,
-      picks: current ? await readStored(current) : null,
+      picks: current ? await readStoredJson<PicksDocument>(current) : null,
     },
     412,
   )
@@ -350,7 +238,9 @@ async function handleWrite(
   // What was pinned before this save, so a fast-track dispatch (ADR-0043, WO-19) below only
   // ever names ids this save is the first to pin — never one already sitting on the identity
   // card from an earlier save, which would just be a redundant probe.
-  const previousIds = new Set(current ? pinnedIds((await readStored(current)) ?? { schema: PICKS_SCHEMA, groups: [] }) : [])
+  const previousIds = new Set(
+    current ? pinnedIds((await readStoredJson<PicksDocument>(current)) ?? { schema: PICKS_SCHEMA, groups: [] }) : [],
+  )
   const ifMatchRaw = request.headers.get('if-match')
   const ifMatch = ifMatchRaw === null ? null : stripWeak(ifMatchRaw)
 
@@ -455,7 +345,7 @@ export const onRequest: PagesFunction = async (context) => {
   // Authorisation first, before the method, the body or anything else is looked
   // at: an unauthenticated request learns nothing about this route.
   const auth = await authoriseAccessRequest(request, env)
-  if (!auth.ok) return refuse(auth)
+  if (!auth.ok) return refuse('picks', auth)
 
   const method = request.method.toUpperCase()
   if (method !== 'GET' && method !== 'PUT' && method !== 'POST') {

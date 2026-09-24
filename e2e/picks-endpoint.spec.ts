@@ -886,6 +886,78 @@ test.describe('the picker search', () => {
     const body = await res.json()
     expect(body.results.map((c: { id: string }) => c.id)).toEqual(['BBCNews.uk'])
   })
+
+  test.describe('?live=true (WO-21)', () => {
+    const LIVE_IDS = { ids: ['Arte.fr'], generation: 3 }
+
+    test('narrows to active-channel-ids.json and reports live: true', async () => {
+      const { bucket } = makeBucket({ ...PROOF, 'catalogue/active-channel-ids.json': JSON.stringify(LIVE_IDS) })
+      const res = await call(
+        channelsHandler,
+        new Request(`${ORIGIN}/api/picks/channels?live=true`, {
+          headers: { 'Cf-Access-Jwt-Assertion': await goodToken() },
+        }),
+        { ...ENV_VARS, CATALOGUE_BUCKET: bucket },
+      )
+      const body = await res.json()
+      expect(body.live).toBe(true)
+      expect(body.results.map((c: { id: string }) => c.id)).toEqual(['Arte.fr'])
+    })
+
+    test('without ?live, every match is returned and live reports false', async () => {
+      const { bucket } = makeBucket({ ...PROOF, 'catalogue/active-channel-ids.json': JSON.stringify(LIVE_IDS) })
+      const res = await call(
+        channelsHandler,
+        new Request(`${ORIGIN}/api/picks/channels?q=channel`, {
+          headers: { 'Cf-Access-Jwt-Assertion': await goodToken() },
+        }),
+        { ...ENV_VARS, CATALOGUE_BUCKET: bucket },
+      )
+      const body = await res.json()
+      expect(body.live).toBe(false)
+      expect(body.results.length).toBeGreaterThan(1)
+    })
+
+    test('no bucket configured: falls back to the unfiltered list and says so', async () => {
+      const res = await call(
+        channelsHandler,
+        new Request(`${ORIGIN}/api/picks/channels?live=true&q=channel`, {
+          headers: { 'Cf-Access-Jwt-Assertion': await goodToken() },
+        }),
+        ENV_VARS,
+      )
+      const body = await res.json()
+      expect(body.live).toBe(false)
+      expect(body.results.length).toBeGreaterThan(1)
+    })
+
+    test('a malformed active-channel-ids.json falls back the same way, never a 500', async () => {
+      const { bucket } = makeBucket({ ...PROOF, 'catalogue/active-channel-ids.json': 'not json' })
+      const res = await call(
+        channelsHandler,
+        new Request(`${ORIGIN}/api/picks/channels?live=true&q=channel`, {
+          headers: { 'Cf-Access-Jwt-Assertion': await goodToken() },
+        }),
+        { ...ENV_VARS, CATALOGUE_BUCKET: bucket },
+      )
+      expect(res.status).toBe(200)
+      expect((await res.json()).live).toBe(false)
+    })
+
+    test('an absent object (nothing published yet) falls back the same way', async () => {
+      const { bucket } = makeBucket(PROOF)
+      const res = await call(
+        channelsHandler,
+        new Request(`${ORIGIN}/api/picks/channels?live=true&q=channel`, {
+          headers: { 'Cf-Access-Jwt-Assertion': await goodToken() },
+        }),
+        { ...ENV_VARS, CATALOGUE_BUCKET: bucket },
+      )
+      const body = await res.json()
+      expect(body.live).toBe(false)
+      expect(body.results.length).toBeGreaterThan(1)
+    })
+  })
 })
 
 // ---------------------------------------------------------------------------
@@ -1297,8 +1369,12 @@ test.describe('the Function libraries ship no state mutators', () => {
       ['_lib/accessJwt', await import('../functions/api/_lib/accessJwt')],
       ['_lib/iptvOrg', await import('../functions/api/_lib/iptvOrg')],
       ['_lib/picksSchema', await import('../functions/api/_lib/picksSchema')],
+      ['_lib/catalogueBucket', await import('../functions/api/_lib/catalogueBucket')],
+      ['_lib/customChannelsSchema', await import('../functions/api/_lib/customChannelsSchema')],
+      ['_lib/activeChannelIds', await import('../functions/api/_lib/activeChannelIds')],
       ['picks/index', await import('../functions/api/picks/index')],
       ['picks/channels', await import('../functions/api/picks/channels')],
+      ['picks/custom-channels', await import('../functions/api/picks/custom-channels')],
     ]
     for (const [name, mod] of modules) {
       const mutators = Object.keys(mod).filter((key) => /^(reset|age|clear|seed|set)[A-Z]/.test(key))
