@@ -144,7 +144,8 @@ effect on production until it is added in the dashboard as well, and adding
 - `testBandwidth: false` plus `startFragPrefetch`, with `abrEwmaDefaultEstimate` seeded from the speed hls.js measured last time on this device and network (`src/util/bandwidth.ts`, `sl_bandwidth_v1`; saved only from a teardown while playing). A fast link starts on its best level with no ramp-up; a slow one never starts on a level it cannot sustain.
 - `App.tsx` prefetches the player chunk (hls.js) once a catalogue is on screen and the page is idle (skipped under Save-Data and on 2G), so the first channel opened does not wait on it.
 - `vite.config.ts` injects a preload of `catalogue/meta.json` into `index.html`, so the catalogue pointer arrives while the bundle downloads rather than after it runs.
-- `VideoPlayer.tsx` warms the next channel's resolved manifest with a `priority: 'low'` fetch 1.5 s after playback starts, so the browser and edge cache are primed before the user switches.
+- `src/util/preconnect.ts` opens the connection (DNS, TCP, TLS; no bytes, no Function invocation) to the stream server the player will try first: for a card after a short focus/hover dwell, and for both neighbours once the current channel plays. Proxied streams are skipped (same origin, already connected); so is Save-Data. Live playlists are not cacheable, so fetching a neighbour's manifest ahead of time warmed nothing and is no longer done.
+- On a return visit the search index is built at idle (or on the first search), not before the grid paints (`setSearchIndexLazy` in `searchText.ts`).
 
 ### 4. Catalogue Read Path & Read Budget
 - **Rule**: **R2 first, Redis only as a fallback** (ADR-0030). `catalogueSource.ts` asks `r2.ts`

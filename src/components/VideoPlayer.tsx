@@ -25,6 +25,7 @@ import {
 } from '../util/streamFailure'
 import type { FailureClass } from '../util/streamFailure'
 import { rememberBandwidth, startingBandwidth } from '../util/bandwidth'
+import { preconnectChannel } from '../util/preconnect'
 import './VideoPlayer.css'
 
 interface Props {
@@ -591,33 +592,20 @@ export function VideoPlayer({ channel, allChannels, returnTo = '/' }: Props) {
   const channelIdx = allChannels.findIndex((c) => c.id === channel.id)
 
   /**
-   * Warms the next channel's manifest while the current channel still plays.
-   *
-   * HLS spends its first 300-800ms fetching and parsing the manifest. Firing a
-   * single low-priority request for the resolved URL ahead of time lets the edge
-   * and browser cache the response, so switching feels instant.
+   * Once this channel plays, opens connections to the channels either side of it, so
+   * zapping to one skips DNS, TCP and TLS. This replaced a manifest fetch that warmed
+   * nothing: live playlists are not cacheable, and a proxied one cost a Function
+   * invocation and competed with the current channel's own start.
    */
   useEffect(() => {
-    if (allChannels.length <= 1) return
+    if (isBuffering || allChannels.length <= 1) return
     const idx = allChannels.findIndex((c) => c.id === channel.id)
-    const neighbour = idx >= 0 ? allChannels[(idx + 1) % allChannels.length] : allChannels[0]
-    if (!neighbour || neighbour.id === channel.id) return
-
-    const timer = window.setTimeout(() => {
-      const streams = neighbour.streams && neighbour.streams.length > 0
-        ? neighbour.streams
-        : (neighbour.stream ? [neighbour.stream] : [])
-      const cached = getCachedWorkingStream(neighbour.id)
-      const ordered = orderStreamsForPlayback(streams, cached?.url)
-      const target = ordered[0]
-      if (!target?.url) return
-      const useProxy = (cached && cached.url === target.url ? cached.useProxy : false) || isMixedContent(target.url)
-      const warmUrl = useProxy ? getProxyStreamUrl(target.url, null, null, [], neighbour.id) : target.url
-      fetch(warmUrl, { method: 'GET', priority: 'low', cache: 'force-cache' } as RequestInit).catch(() => {})
-    }, 1500)
-
-    return () => window.clearTimeout(timer)
-  }, [channel.id, allChannels])
+    if (idx < 0) return
+    for (const step of [1, -1]) {
+      const neighbour = allChannels[(idx + step + allChannels.length) % allChannels.length]
+      if (neighbour && neighbour.id !== channel.id) preconnectChannel(neighbour)
+    }
+  }, [channel.id, allChannels, isBuffering])
 
   // Cycle within filtered list in the same order shown, with wraparound
   const prevChannel = useMemo(() => {

@@ -243,6 +243,24 @@ let _index: SearchIndex | null = null
  */
 export function setSearchIndex(index: SearchIndex | null): void {
   _index = index
+  _build = null
+}
+
+let _build: (() => SearchIndex) | null = null
+
+/**
+ * Installs an index to be built later: when the page is idle (`ensureSearchIndex`)
+ * or on the first search, whichever comes first, so a search never runs unindexed.
+ */
+export function setSearchIndexLazy(build: () => SearchIndex): void {
+  _index = null
+  _build = build
+}
+
+export function ensureSearchIndex(): void {
+  if (_index || !_build) return
+  _index = _build()
+  _build = null
 }
 
 /**
@@ -251,6 +269,8 @@ export function setSearchIndex(index: SearchIndex | null): void {
  * empty) for non-empty queries so callers can `has(id)` without null-checks.
  */
 export function computeMatchSet(normalizedQuery: string): Set<string> | null {
+  if (!normalizedQuery) return null
+  ensureSearchIndex()
   if (!_index) return null
   return intersectMatches(_index, normalizedQuery)
 }

@@ -1,10 +1,11 @@
-import { useCallback } from 'react'
+import { useCallback, useEffect, useRef } from 'react'
 import { useNavigate, useLocation } from 'react-router-dom'
 import type { EnrichedChannel } from '../hooks/useChannels'
 import type { EpgProgram } from '../api/types'
 import { useFavourites } from '../hooks/useChannels'
 import { formatCountryDisplay } from '../util/country'
 import { LOGO_SIZE, logoUrl, handleLogoError } from '../util/logo'
+import { preconnectChannel } from '../util/preconnect'
 import './ChannelCard.css'
 
 interface Props {
@@ -47,6 +48,21 @@ export function ChannelCard({ channel, nowPlaying, size = 'medium', onWatch, pla
     })
   }, [hasStream, channel.id, playlist, location.pathname, location.search, navigate, onWatch])
 
+  // A short dwell, so a D-pad sweep along a row does not open a socket per card passed.
+  const warmTimer = useRef<number | null>(null)
+  const warm = useCallback(() => {
+    if (!hasStream || warmTimer.current) return
+    warmTimer.current = window.setTimeout(() => {
+      warmTimer.current = null
+      preconnectChannel(channel)
+    }, 150)
+  }, [hasStream, channel])
+  const unwarm = useCallback(() => {
+    if (warmTimer.current) window.clearTimeout(warmTimer.current)
+    warmTimer.current = null
+  }, [])
+  useEffect(() => unwarm, [unwarm])
+
   const handleFav = useCallback((e: React.MouseEvent) => {
     e.stopPropagation()
     e.preventDefault()
@@ -60,6 +76,10 @@ export function ChannelCard({ channel, nowPlaying, size = 'medium', onWatch, pla
     <article
       className={`channel-card channel-card--${size} ${!hasStream ? 'channel-card--no-stream' : ''}`}
       onClick={handleClick}
+      onFocus={warm}
+      onPointerEnter={warm}
+      onBlur={unwarm}
+      onPointerLeave={unwarm}
       role={hasStream ? 'button' : undefined}
       tabIndex={hasStream ? 0 : -1}
       data-card="channel"

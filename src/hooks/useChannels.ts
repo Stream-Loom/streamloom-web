@@ -10,7 +10,13 @@ import {
 import type { CatalogueGeneration, CatalogueSource } from '../api/catalogueSource'
 import { loadSchedule } from '../util/scheduleLoader'
 import { enrichChannels } from '../util/enrich'
-import { buildSearchIndex, setSearchIndex as installSearchIndex, type SearchIndex } from '../util/searchText'
+import {
+  buildSearchIndex,
+  ensureSearchIndex,
+  setSearchIndex as installSearchIndex,
+  setSearchIndexLazy,
+  type SearchIndex,
+} from '../util/searchText'
 import {
   clearStoredCatalogue,
   readStoredCatalogue,
@@ -257,10 +263,14 @@ async function loadData(force = false) {
       _source = 'cache'
       _loading = false
       _error = null
-      // Reuse the cache for the search index too; a refresh that finds a new
-      // generation will rebuild and reinstall it.
-      installSearchIndex(buildSearchIndex(stored.channels))
+      // The search index is built after the grid paints, not before: the trigram
+      // build over every channel is main-thread work a return visit waited on. A
+      // search typed before then builds it on the spot; a refresh that finds a new
+      // generation installs its own index, which discards this pending build.
+      setSearchIndexLazy(() => buildSearchIndex(stored.channels))
       notify()
+      if (typeof requestIdleCallback === 'function') requestIdleCallback(ensureSearchIndex, { timeout: 2000 })
+      else setTimeout(ensureSearchIndex, 0)
       loadData(true).catch(() => {})
       return
     }
