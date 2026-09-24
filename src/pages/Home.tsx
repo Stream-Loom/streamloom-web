@@ -526,6 +526,12 @@ export function Home() {
                     <span className="active-chip__remove">✕</span>
                   </button>
                 )}
+                {effectiveLanguage && (
+                  <button className="active-chip" onClick={() => setSelectedLanguage(null)}>
+                    <span>🌐 {availableLanguages.find((l) => l.code === effectiveLanguage)?.name ?? effectiveLanguage}</span>
+                    <span className="active-chip__remove">✕</span>
+                  </button>
+                )}
                 <button className="active-chip__clear-all" onClick={clearFilters}>
                   Clear all
                 </button>
@@ -654,11 +660,20 @@ export function Home() {
                           : `${activeGridChannels.length} channels`}
                   </h2>
                 </div>
-                <div className="home-search-results__grid">
-                  {activeGridChannels.slice(0, gridLimit).map((ch) => (
-                    <ChannelCard key={ch.id} channel={ch} playlist={activeGridPlaylist} onWatch={handleWatch} />
-                  ))}
-                </div>
+                {activeGridChannels.length === 0 ? (
+                  <div className="home-search-results__empty">
+                    <p>No channels match these filters.</p>
+                    <button className="active-chip__clear-all" onClick={clearFilters}>
+                      Clear filters
+                    </button>
+                  </div>
+                ) : (
+                  <div className="home-search-results__grid">
+                    {activeGridChannels.slice(0, gridLimit).map((ch) => (
+                      <ChannelCard key={ch.id} channel={ch} playlist={activeGridPlaylist} onWatch={handleWatch} />
+                    ))}
+                  </div>
+                )}
 
                 {gridLimit < activeGridChannels.length && (
                   <div className="home-load-more">

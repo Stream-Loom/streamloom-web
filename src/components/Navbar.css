@@ -183,3 +183,31 @@
   }
 }
 
+/* Compact nav: phone landscape. --nav-height/--mobile-tab-height already
+   shrink (index.css), so trim what no longer fits at that height instead of
+   letting it clip or overflow. */
+@media (max-height: 500px) {
+  .navbar {
+    padding-top: 0;
+  }
+
+  .navbar__logo-icon,
+  .navbar__logo-text {
+    font-size: 16px;
+  }
+
+  .navbar__icon-btn {
+    width: 30px;
+    height: 30px;
+    font-size: 14px;
+  }
+
+  .mobile-nav__label {
+    display: none;
+  }
+
+  .mobile-nav__icon {
+    font-size: 18px;
+  }
+}
+

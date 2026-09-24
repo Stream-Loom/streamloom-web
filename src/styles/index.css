@@ -78,6 +78,17 @@
   --sal: env(safe-area-inset-left, 0px);
 }
 
+/* Compact nav: phone landscape (a short viewport, not a narrow one — hence
+   max-height, not max-width) has too little vertical room to spend 64px+60px
+   of it on chrome. Every consumer of these two tokens (Navbar.css's bars,
+   the page-wrapper padding they size) shrinks together. */
+@media (max-height: 500px) {
+  :root {
+    --nav-height: 48px;
+    --mobile-tab-height: 44px;
+  }
+}
+
 /* ---------- Light Theme: Alabaster Silk (Super Classy & Tailored) ---------- */
 [data-theme="light"] {
   --bg-void: #eaeaf0;
@@ -228,4 +239,17 @@ ul, ol { list-style: none; }
   /* Neutral: Apple does not use film grain, and a blend layer forces the
   /* scrolling page behind it to re-composite on every frame. */
   mix-blend-mode: normal;
+}
+
+/* ---------- Reduced motion ---------- */
+/* Vestibular safety, site-wide: every animation and transition collapses to
+   an instant state change for anyone with this OS preference set, not just
+   the few components that opted in locally. */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+    scroll-behavior: auto !important;
+  }
 }

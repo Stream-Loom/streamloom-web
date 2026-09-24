@@ -13,17 +13,22 @@ interface Props {
 export function HeroSection({ channels }: Props) {
   const navigate = useNavigate()
   const [index, setIndex] = useState(0)
+  // Auto-advancing content needs a way to stop it (vestibular safety); start
+  // stopped for anyone who has already told the OS they don't want motion.
+  const [isPaused, setIsPaused] = useState(
+    () => typeof window !== 'undefined' && window.matchMedia?.('(prefers-reduced-motion: reduce)').matches,
+  )
 
   // Rotate every 8 seconds across top 5 channels with streams & logos
   const heroChannels = channels.filter((c) => c.stream && logoUrl(c.logo)).slice(0, 5)
 
   useEffect(() => {
-    if (heroChannels.length <= 1) return
+    if (heroChannels.length <= 1 || isPaused) return
     const id = setInterval(() => {
       setIndex((i) => (i + 1) % heroChannels.length)
     }, 8000)
     return () => clearInterval(id)
-  }, [heroChannels.length])
+  }, [heroChannels.length, isPaused])
 
   const featured = heroChannels[index]
   if (!featured) return null
@@ -97,6 +102,16 @@ export function HeroSection({ channels }: Props) {
 
       {/* Dots indicator */}
       <div className="hero__dots">
+        {heroChannels.length > 1 && (
+          <button
+            className="hero__pause"
+            onClick={() => setIsPaused((p) => !p)}
+            aria-label={isPaused ? 'Resume auto-rotating' : 'Pause auto-rotating'}
+            title={isPaused ? 'Resume' : 'Pause'}
+          >
+            {isPaused ? '▶' : '⏸'}
+          </button>
+        )}
         {heroChannels.map((_, i) => (
           <button
             key={i}

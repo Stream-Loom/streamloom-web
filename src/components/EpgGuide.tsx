@@ -431,8 +431,13 @@ export function EpgGuide({
   const scrollToNow = useCallback(() => {
     const el = viewportRef.current
     if (!el) return
-    el.scrollTo({ top: 0, behavior: 'smooth' })
-  }, [])
+    const playingId = sessionStorage.getItem('sl_last_viewed')
+    const rowIndex = playingId ? guideChannels.findIndex((c) => c.id === playingId) : -1
+    const top =
+      rowIndex >= 0 ? Math.max(0, rowIndex * rowHeight - el.clientHeight / 2 + rowHeight / 2) : el.scrollTop
+    const left = Math.max(0, nowOffset * PIXELS_PER_MINUTE - (el.clientWidth - sidebarWidth) / 2)
+    el.scrollTo({ top, left, behavior: 'smooth' })
+  }, [guideChannels, rowHeight, sidebarWidth, nowOffset])
 
   // Stable across filter edits: rows are memoized on this prop, so a new
   // identity here would re-render every visible row on each keystroke.

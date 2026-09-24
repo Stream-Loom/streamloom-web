@@ -86,16 +86,6 @@ export function Navbar() {
           <span className="mobile-nav__label">Favourites</span>
         </NavLink>
 
-        <button
-          type="button"
-          className="mobile-nav__item"
-          onClick={toggleTheme}
-          aria-label={isDark ? 'Switch to Light mode' : 'Switch to Dark mode'}
-        >
-          <span className="mobile-nav__icon">{isDark ? '☀️' : '🌙'}</span>
-          <span className="mobile-nav__label">{isDark ? 'Light' : 'Dark'}</span>
-        </button>
-
         <NavLink
           to="/settings"
           className={({ isActive }) => `mobile-nav__item ${isActive ? 'mobile-nav__item--active' : ''}`}

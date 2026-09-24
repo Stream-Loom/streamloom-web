@@ -79,6 +79,7 @@ interface FailureEvidence {
 export function VideoPlayer({ channel, allChannels, returnTo = '/' }: Props) {
   const videoRef = useRef<HTMLVideoElement>(null)
   const containerRef = useRef<HTMLDivElement>(null)
+  const activeDrawerItemRef = useRef<HTMLButtonElement>(null)
   const hlsRef = useRef<Hls | null>(null)
   const navigate = useNavigate()
   const { programs } = useEpg(channel.id)
@@ -287,6 +288,26 @@ export function VideoPlayer({ channel, allChannels, returnTo = '/' }: Props) {
     const container = containerRef.current
     if (!container) return
 
+    // iOS Safari has no element fullscreen at all; it exposes fullscreen
+    // only on the <video> itself, natively (own play/pause/scrub HUD, no
+    // fullscreenchange event or document.fullscreenElement either — tracked
+    // instead by the video's own webkitbeginfullscreen/webkitendfullscreen,
+    // wired below).
+    type IosVideo = HTMLVideoElement & {
+      webkitEnterFullscreen?: () => void
+      webkitExitFullscreen?: () => void
+      webkitDisplayingFullscreen?: boolean
+    }
+    const video = videoRef.current as IosVideo | null
+    if (!container.requestFullscreen && video?.webkitEnterFullscreen) {
+      if (video.webkitDisplayingFullscreen) {
+        video.webkitExitFullscreen?.()
+      } else {
+        video.webkitEnterFullscreen()
+      }
+      return
+    }
+
     if (!document.fullscreenElement) {
       container.requestFullscreen().then(() => {
         setIsFullscreen(true)
@@ -294,6 +315,8 @@ export function VideoPlayer({ channel, allChannels, returnTo = '/' }: Props) {
         hideHudTimer.current = window.setTimeout(() => {
           setShowHud(false)
         }, 1200)
+        const lock = screen.orientation?.lock
+        if (lock) lock.call(screen.orientation, 'landscape').catch(() => {})
       }).catch(() => {})
     } else {
       document.exitFullscreen().then(() => {
@@ -1196,14 +1219,43 @@ export function VideoPlayer({ channel, allChannels, returnTo = '/' }: Props) {
         setShowChannelList(false)
         return
       }
-      // Don't hijack vertical arrows when browsing the channel list drawer
-      if (e.key === 'ArrowUp' || e.key === 'ArrowDown') {
+      // Don't hijack any arrow key when browsing the channel list drawer —
+      // it's the drawer's own list to navigate, not the HUD's.
+      if (
+        e.key === 'ArrowUp' ||
+        e.key === 'ArrowDown' ||
+        e.key === 'ArrowLeft' ||
+        e.key === 'ArrowRight'
+      ) {
         return
       }
     }
 
+    // TV remote model: with the HUD hidden, up/down are a dedicated channel-zap
+    // D-pad; with it showing, all four arrows move focus between HUD controls
+    // instead, so the controls are reachable at all.
+    const isArrowKey =
+      e.key === 'ArrowUp' || e.key === 'ArrowDown' || e.key === 'ArrowLeft' || e.key === 'ArrowRight'
+    const hudControls = () =>
+      Array.from(
+        containerRef.current?.querySelectorAll<HTMLElement>(
+          '.player__hud button, .player__hud [tabindex]:not([tabindex="-1"])'
+        ) ?? []
+      ).filter((el) => el.offsetParent !== null)
+
+    if (isHudVisible && isArrowKey) {
+      e.preventDefault()
+      const controls = hudControls()
+      if (controls.length) {
+        const delta = e.key === 'ArrowUp' || e.key === 'ArrowLeft' ? -1 : 1
+        const current = controls.indexOf(document.activeElement as HTMLElement)
+        const next = current === -1 ? (delta === 1 ? 0 : controls.length - 1) : (current + delta + controls.length) % controls.length
+        controls[next].focus()
+      }
+      return
+    }
+
     if (
-      e.key === 'ArrowLeft' ||
       e.key === 'ArrowUp' ||
       e.key === '[' ||
       e.key === 'p' ||
@@ -1215,7 +1267,6 @@ export function VideoPlayer({ channel, allChannels, returnTo = '/' }: Props) {
       e.preventDefault()
       goToPrevChannel()
     } else if (
-      e.key === 'ArrowRight' ||
       e.key === 'ArrowDown' ||
       e.key === ']' ||
       e.key === 'n' ||
@@ -1230,6 +1281,9 @@ export function VideoPlayer({ channel, allChannels, returnTo = '/' }: Props) {
       e.preventDefault()
       handleBack()
     } else if (e.key === ' ') {
+      // A focused HUD button owns Space itself (native activation); only
+      // treat it as play/pause when nothing in the HUD has focus.
+      if (isHudVisible && hudControls().includes(document.activeElement as HTMLElement)) return
       e.preventDefault()
       togglePlayPause()
     } else if (e.key === 'f' || e.key === 'F') {
@@ -1249,6 +1303,7 @@ export function VideoPlayer({ channel, allChannels, returnTo = '/' }: Props) {
     showChannelList,
     showSubtitleMenu,
     showAudioMenu,
+    isHudVisible,
     handleMouseMove,
     goToPrevChannel,
     goToNextChannel,
@@ -1273,13 +1328,49 @@ export function VideoPlayer({ channel, allChannels, returnTo = '/' }: Props) {
     return () => window.removeEventListener('keydown', handleKeyDown)
   }, [])
 
-  const [currentTimestamp] = useState(() => Date.now())
+  useEffect(() => {
+    if (showChannelList) activeDrawerItemRef.current?.scrollIntoView({ block: 'center' })
+  }, [showChannelList])
+
+  const [currentTimestamp, setCurrentTimestamp] = useState(() => Date.now())
+  useEffect(() => {
+    const tick = () => setCurrentTimestamp(Date.now())
+    tick()
+    const id = window.setInterval(tick, 30_000)
+    return () => window.clearInterval(id)
+  }, [channel.id])
   const nowPlaying = useMemo(() => getCurrentProgram(programs, currentTimestamp), [programs, currentTimestamp])
   const nextProgram = useMemo(
     () => programs.find((p) => new Date(p.start_time).getTime() > currentTimestamp),
     [programs, currentTimestamp]
   )
   const fav = isFavourite(channel.id)
+
+  // Lock-screen, hardware-key and PiP transport controls. previous/next map
+  // to zapping, same as the keyboard shortcuts.
+  useEffect(() => {
+    if (!('mediaSession' in navigator)) return
+    const artwork = logoUrl(channel.logo)
+    navigator.mediaSession.metadata = new MediaMetadata({
+      title: channel.name,
+      artist: nowPlaying?.title ?? '',
+      artwork: artwork ? [{ src: artwork, sizes: `${LOGO_SIZE}x${LOGO_SIZE}`, type: 'image/webp' }] : [],
+    })
+    navigator.mediaSession.setActionHandler('play', togglePlayPause)
+    navigator.mediaSession.setActionHandler('pause', togglePlayPause)
+    navigator.mediaSession.setActionHandler('previoustrack', goToPrevChannel)
+    navigator.mediaSession.setActionHandler('nexttrack', goToNextChannel)
+    return () => {
+      navigator.mediaSession.setActionHandler('play', null)
+      navigator.mediaSession.setActionHandler('pause', null)
+      navigator.mediaSession.setActionHandler('previoustrack', null)
+      navigator.mediaSession.setActionHandler('nexttrack', null)
+    }
+  }, [channel.id, channel.name, channel.logo, nowPlaying?.title, togglePlayPause, goToPrevChannel, goToNextChannel])
+
+  useEffect(() => {
+    if ('mediaSession' in navigator) navigator.mediaSession.playbackState = isPlaying ? 'playing' : 'paused'
+  }, [isPlaying])
 
   return (
     <div
@@ -1402,7 +1493,7 @@ export function VideoPlayer({ channel, allChannels, returnTo = '/' }: Props) {
 
       {/* Toast message */}
       {toastMessage && (
-        <div className="player__toast">
+        <div className="player__toast" role="status" aria-live="polite">
           <span>⚡</span>
           <span>{toastMessage}</span>
         </div>
@@ -1743,34 +1834,39 @@ export function VideoPlayer({ channel, allChannels, returnTo = '/' }: Props) {
             <button onClick={() => setShowChannelList(false)} aria-label="Close drawer">✕</button>
           </div>
           <div className="player__drawer-list">
-            {allChannels.map((c) => (
-              <div
-                key={c.id}
-                className={`player__drawer-item ${c.id === channel.id ? 'player__drawer-item--active' : ''}`}
-                onClick={() => {
-                  setShowChannelList(false)
-                  targetChannelIdRef.current = c.id
-                  switchChannelCleanly(c)
-                }}
-              >
-                {logoUrl(c.logo) ? (
-                  <img
-                    src={logoUrl(c.logo)!}
-                    alt={c.name}
-                    width={LOGO_SIZE}
-                    height={LOGO_SIZE}
-                    loading="lazy"
-                    decoding="async"
-                    onError={handleLogoError}
-                    className="player__drawer-logo"
-                  />
-                ) : (
-                  <div className="player__drawer-initials">{c.name.slice(0, 2).toUpperCase()}</div>
-                )}
-                <span className="player__drawer-name">{c.name}</span>
-                {c.country && <span className="player__drawer-badge">{formatCountryDisplay(c.country)}</span>}
-              </div>
-            ))}
+            {allChannels.map((c) => {
+              const isActive = c.id === channel.id
+              return (
+                <button
+                  key={c.id}
+                  ref={isActive ? activeDrawerItemRef : undefined}
+                  type="button"
+                  className={`player__drawer-item ${isActive ? 'player__drawer-item--active' : ''}`}
+                  onClick={() => {
+                    setShowChannelList(false)
+                    targetChannelIdRef.current = c.id
+                    switchChannelCleanly(c)
+                  }}
+                >
+                  {logoUrl(c.logo) ? (
+                    <img
+                      src={logoUrl(c.logo)!}
+                      alt={c.name}
+                      width={LOGO_SIZE}
+                      height={LOGO_SIZE}
+                      loading="lazy"
+                      decoding="async"
+                      onError={handleLogoError}
+                      className="player__drawer-logo"
+                    />
+                  ) : (
+                    <div className="player__drawer-initials">{c.name.slice(0, 2).toUpperCase()}</div>
+                  )}
+                  <span className="player__drawer-name">{c.name}</span>
+                  {c.country && <span className="player__drawer-badge">{formatCountryDisplay(c.country)}</span>}
+                </button>
+              )
+            })}
           </div>
         </div>
       )}

@@ -77,68 +77,69 @@ export function ChannelCard({ channel, nowPlaying, size = 'medium', onWatch, pla
   return (
     <article
       className={`channel-card channel-card--${size} ${!hasStream ? 'channel-card--no-stream' : ''}`}
-      onClick={handleClick}
-      onFocus={warm}
-      onPointerEnter={warm}
-      onBlur={unwarm}
-      onPointerLeave={unwarm}
-      role={hasStream ? 'button' : undefined}
-      tabIndex={hasStream ? 0 : -1}
       data-card="channel"
       data-channel-id={channel.id}
-      onKeyDown={(e) => {
-        if (e.key === 'Enter' || e.key === ' ') {
-          e.preventDefault()
-          handleClick()
-        }
-      }}
-      aria-label={`Play ${channel.name}`}
     >
-      <div className="channel-card__thumb">
-        {logoSrc ? (
-          <img
-            src={logoSrc}
-            alt={channel.name}
-            width={LOGO_SIZE}
-            height={LOGO_SIZE}
-            loading="lazy"
-            decoding="async"
-            onError={handleLogoError}
-          />
-        ) : (
-          <span className="channel-card__initials">
-            {channel.name.slice(0, 2).toUpperCase()}
-          </span>
-        )}
-        {hasStream && <div className="channel-card__play-overlay">▶</div>}
+      {/* The playable surface is its own button: a <button> can't legally
+          contain the favourite <button> below it, and AT users would land on
+          two overlapping interactive targets with no clear order. */}
+      <button
+        type="button"
+        className="channel-card__surface"
+        onClick={handleClick}
+        onFocus={warm}
+        onPointerEnter={warm}
+        onBlur={unwarm}
+        onPointerLeave={unwarm}
+        disabled={!hasStream}
+        aria-label={`Play ${channel.name}`}
+      >
+        <div className="channel-card__thumb">
+          {logoSrc ? (
+            <img
+              src={logoSrc}
+              alt={channel.name}
+              width={LOGO_SIZE}
+              height={LOGO_SIZE}
+              loading="lazy"
+              decoding="async"
+              onError={handleLogoError}
+            />
+          ) : (
+            <span className="channel-card__initials">
+              {channel.name.slice(0, 2).toUpperCase()}
+            </span>
+          )}
+          {hasStream && <div className="channel-card__play-overlay">▶</div>}
 
-        {/* Quality badge */}
-        {channel.stream?.quality && channel.stream.quality !== '' && (
-          <span className="channel-card__quality">{channel.stream.quality.toUpperCase()}</span>
-        )}
+          {/* Quality badge */}
+          {channel.stream?.quality && channel.stream.quality !== '' && (
+            <span className="channel-card__quality">{channel.stream.quality.toUpperCase()}</span>
+          )}
+        </div>
 
-        {/* Favourite button */}
-        <button
-          className={`channel-card__fav ${fav ? 'channel-card__fav--active' : ''}`}
-          onClick={handleFav}
-          aria-label={fav ? 'Remove from favourites' : 'Add to favourites'}
-          title={fav ? 'Remove favourite' : 'Add to favourites'}
-        >
-          {fav ? '♥' : '♡'}
-        </button>
-      </div>
+        <div className="channel-card__info">
+          <p className="channel-card__name" title={channel.name}>{channel.name}</p>
+          {nowPlaying ? (
+            <p className="channel-card__epg" title={nowPlaying.title}>
+              <span className="live-dot" style={{ marginRight: 6 }} />
+              <span className="channel-card__epg-text">{nowPlaying.title}</span>
+            </p>
+          ) : countryDisplay ? (
+            <p className="channel-card__country" title={countryDisplay}>{countryDisplay}</p>
+          ) : null}
+        </div>
+      </button>
 
-      <div className="channel-card__info">
-        <p className="channel-card__name" title={channel.name}>{channel.name}</p>
-        {nowPlaying ? (
-          <p className="channel-card__epg" title={nowPlaying.title}>
-            <span className="live-dot" style={{ marginRight: 6 }} />
-            <span className="channel-card__epg-text">{nowPlaying.title}</span>
-          </p>
-        ) : countryDisplay ? (
-          <p className="channel-card__country" title={countryDisplay}>{countryDisplay}</p>
-        ) : null}
-      </div>
+      {/* Favourite button: a sibling of the surface, not nested in it. */}
+      <button
+        className={`channel-card__fav ${fav ? 'channel-card__fav--active' : ''}`}
+        onClick={handleFav}
+        aria-label={fav ? 'Remove from favourites' : 'Add to favourites'}
+        title={fav ? 'Remove favourite' : 'Add to favourites'}
+      >
+        {fav ? '♥' : '♡'}
+      </button>
     </article>
   )
 }
