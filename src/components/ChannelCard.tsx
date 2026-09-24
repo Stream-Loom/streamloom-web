@@ -6,6 +6,7 @@ import { useFavourites } from '../hooks/useChannels'
 import { formatCountryDisplay } from '../util/country'
 import { LOGO_SIZE, logoUrl, handleLogoError } from '../util/logo'
 import { preconnectChannel } from '../util/preconnect'
+import { prefetchPlaylist } from '../util/playlistPrefetch'
 import './ChannelCard.css'
 
 interface Props {
@@ -26,6 +27,7 @@ export function ChannelCard({ channel, nowPlaying, size = 'medium', onWatch, pla
 
   const handleClick = useCallback(() => {
     if (!hasStream) return
+    prefetchPlaylist(channel)
     onWatch?.(channel.id)
     sessionStorage.setItem('sl_last_viewed', channel.id)
     const returnPath = location.pathname + location.search
@@ -46,7 +48,7 @@ export function ChannelCard({ channel, nowPlaying, size = 'medium', onWatch, pla
         returnTo: returnPath,
       },
     })
-  }, [hasStream, channel.id, playlist, location.pathname, location.search, navigate, onWatch])
+  }, [hasStream, channel, playlist, location.pathname, location.search, navigate, onWatch])
 
   // A short dwell, so a D-pad sweep along a row does not open a socket per card passed.
   const warmTimer = useRef<number | null>(null)

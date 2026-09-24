@@ -3,6 +3,7 @@ import { useNavigate } from 'react-router-dom'
 import type { EnrichedChannel } from '../hooks/useChannels'
 import { formatCountryDisplay } from '../util/country'
 import { LOGO_SIZE, logoUrl, handleLogoError } from '../util/logo'
+import { prefetchPlaylist } from '../util/playlistPrefetch'
 import './HeroSection.css'
 
 interface Props {
@@ -71,6 +72,7 @@ export function HeroSection({ channels }: Props) {
           <button
             className="hero__btn hero__btn--primary"
             onClick={() => {
+              prefetchPlaylist(featured)
               sessionStorage.setItem('sl_last_viewed', featured.id)
               try {
                 sessionStorage.removeItem('sl_active_playlist')

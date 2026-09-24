@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, useCallback, useMemo } from 'react'
 import { useNavigate } from 'react-router-dom'
-import Hls from 'hls.js'
+import Hls, { type PlaylistLoaderConstructor } from 'hls.js'
 import type { EnrichedChannel } from '../hooks/useChannels'
 import type { EpgProgram } from '../api/types'
 import { useEpg, useFavourites, useRecent } from '../hooks/useChannels'
@@ -26,6 +26,8 @@ import {
 import type { FailureClass } from '../util/streamFailure'
 import { rememberBandwidth, startingBandwidth } from '../util/bandwidth'
 import { preconnectChannel } from '../util/preconnect'
+import { HandoffLoader } from '../util/handoffLoader'
+import { MANIFEST_TIMEOUT_MS } from '../util/playlistPrefetch'
 import './VideoPlayer.css'
 
 interface Props {
@@ -945,7 +947,10 @@ export function VideoPlayer({ channel, allChannels, returnTo = '/' }: Props) {
         // connection never ramps up from 360p and a slow one never starts on 1080p.
         abrEwmaDefaultEstimate: startingBandwidth(),
         testBandwidth: false,
-        manifestLoadingTimeOut: 10000,
+        // The first manifest request takes the playlist fetched when the channel was tapped.
+        // hls.js types its default loader for every context; a playlist loader is one.
+        pLoader: HandoffLoader as unknown as PlaylistLoaderConstructor,
+        manifestLoadingTimeOut: MANIFEST_TIMEOUT_MS,
         manifestLoadingMaxRetry: 2,
         manifestLoadingRetryDelay: 500,
         levelLoadingTimeOut: 10000,

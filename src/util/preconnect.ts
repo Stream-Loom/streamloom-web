@@ -18,8 +18,9 @@ import { connectionInfo } from './bandwidth'
  * hls.js (any browser with Media Source) loads with credential-less XHR, which uses
  * the anonymous connection pool; native HLS (Safari without MSE) loads `video.src`
  * with credentials, which uses the other pool. The preconnect must match to be used.
+ * It is also the test for "the player loads through hls.js".
  */
-const anonymousPool = typeof window !== 'undefined' && ('MediaSource' in window || 'ManagedMediaSource' in window)
+export const anonymousPool = typeof window !== 'undefined' && ('MediaSource' in window || 'ManagedMediaSource' in window)
 
 /** Browsers drop an unused preconnect after ~10 s; one older than this may be gone. */
 const REUSE_MS = 10_000
@@ -41,17 +42,26 @@ function preconnectOrigin(origin: string) {
   setTimeout(() => link.remove(), REUSE_MS)
 }
 
-/** Warms the origin of the stream the player will try first for this channel. */
-export function preconnectChannel(channel: EnrichedChannel) {
+/**
+ * The URL the player will request first for this channel, when it goes straight to
+ * the stream's own server: null when it goes through the proxy (mixed content, or a
+ * cached result that needed it), which is this origin and already connected.
+ */
+export function directStreamUrl(channel: EnrichedChannel): string | null {
   const streams = channel.streams?.length ? channel.streams : channel.stream ? [channel.stream] : []
   const cached = getCachedWorkingStream(channel.id)
   const first = orderStreamsForPlayback(streams, cached?.url)[0]
-  if (!first?.url) return
-  if (isMixedContent(first.url) || (cached?.url === first.url && cached.useProxy)) return
+  if (!first?.url) return null
+  if (isMixedContent(first.url) || (cached?.url === first.url && cached.useProxy)) return null
   try {
-    const origin = new URL(first.url).origin
-    if (origin !== window.location.origin) preconnectOrigin(origin)
+    return new URL(first.url).origin === window.location.origin ? null : first.url
   } catch {
-    // not a URL: nothing to warm
+    return null // not a URL
   }
+}
+
+/** Warms the origin of the stream the player will try first for this channel. */
+export function preconnectChannel(channel: EnrichedChannel) {
+  const url = directStreamUrl(channel)
+  if (url) preconnectOrigin(new URL(url).origin)
 }

@@ -17,6 +17,7 @@ import {
   useTranslationVersion,
 } from '../util/translate'
 import { applyFilters } from '../util/epgFilter'
+import { prefetchPlaylist } from '../util/playlistPrefetch'
 import type { GuideFilters } from '../util/epgFilter'
 import { EpgToolbar } from './EpgToolbar'
 import { EpgTimeline } from './EpgTimeline'
@@ -436,12 +437,16 @@ export function EpgGuide({
   // Stable across filter edits: rows are memoized on this prop, so a new
   // identity here would re-render every visible row on each keystroke.
   const playlistRef = useRef<string[]>([])
+  const guideChannelsRef = useRef(guideChannels)
   useEffect(() => {
     playlistRef.current = guideChannels.map((c) => c.id)
+    guideChannelsRef.current = guideChannels
   }, [guideChannels])
 
   const handlePick = useCallback(
     (channelId: string) => {
+      const picked = guideChannelsRef.current.find((c) => c.id === channelId)
+      if (picked) prefetchPlaylist(picked)
       sessionStorage.setItem('sl_last_viewed', channelId)
       navigate(`/watch/${encodeURIComponent(channelId)}`, {
         state: { playlist: playlistRef.current, returnTo: '/guide' },
