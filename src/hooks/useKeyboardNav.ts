@@ -60,7 +60,13 @@ export function useKeyboardNav(options?: Options) {
         const cards = Array.from(document.querySelectorAll<HTMLElement>('[data-card="channel"]'))
         if (cards.length === 0) return
 
-        const currentIndex = activeEl ? cards.indexOf(activeEl) : -1
+        // A card without a stream (shown, never hidden, on the picks row — ADR-0033 §3)
+        // isn't itself in the tab order, so its favourite button is the only stop a
+        // keyboard user lands on for that pin. Resolving from the closest ancestor
+        // card, not an exact match, keeps arrow keys moving from there instead of
+        // reading "not on a card" and snapping back to the first one.
+        const currentCard = activeEl?.closest<HTMLElement>('[data-card="channel"]') ?? null
+        const currentIndex = currentCard ? cards.indexOf(currentCard) : -1
 
         if (currentIndex === -1) {
           // If nothing is focused yet, focus the first card on any arrow press
@@ -70,7 +76,7 @@ export function useKeyboardNav(options?: Options) {
           return
         }
 
-        const currentRect = activeEl!.getBoundingClientRect()
+        const currentRect = currentCard!.getBoundingClientRect()
 
         if (e.key === 'ArrowRight') {
           e.preventDefault()

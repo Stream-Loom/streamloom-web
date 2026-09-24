@@ -125,6 +125,42 @@ test('pinned channels are shown, with the note and the no-stream state', async (
   await expect(row.getByRole('button', { name: 'Play Channel 19', exact: true })).toHaveCount(0)
 })
 
+test('arrow-key navigation moves off a no-stream pin instead of snapping back to the first card', async ({
+  page,
+  context,
+}) => {
+  // A no-stream pin's own card is not in the tab order (ADR-0033 §3 keeps it shown, never
+  // playable), so its favourite button is the only keyboard stop for that pin. Arrow-key
+  // navigation has to resolve "where am I" from that button's card, not just the exact
+  // focused element, or it reads as "nothing focused" and snaps back to the first card.
+  r2.setPicks({
+    schema: 1,
+    updatedAt: '2026-09-22T00:00:00.000Z',
+    groups: [
+      {
+        title: 'Editor picks',
+        items: [
+          { channelId: PLAYABLE, rank: 0 },
+          { channelId: STREAMLESS, rank: 1 },
+          { channelId: 'ch3.xx', rank: 2 },
+        ],
+      },
+    ],
+  })
+
+  await openHome(page, context)
+  const row = picksRow(page, 'Editor picks')
+  await expect(row).toBeVisible()
+
+  await row.getByRole('button', { name: 'Play Channel 1', exact: true }).focus()
+  await page.keyboard.press('Tab') // Channel 1's own favourite button
+  await page.keyboard.press('Tab') // Channel 19's favourite button — its card is unreachable
+  await expect(page.locator(':focus')).toHaveAttribute('aria-label', 'Add to favourites')
+
+  await page.keyboard.press('ArrowRight')
+  await expect(row.getByRole('button', { name: 'Play Channel 3', exact: true })).toBeFocused()
+})
+
 test('a group whose channels are not published yet is not drawn; an empty group is not drawn', async ({
   page,
   context,
