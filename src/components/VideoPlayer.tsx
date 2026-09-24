@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, useCallback, useMemo } from 'react'
+import { useEffect, useLayoutEffect, useRef, useState, useCallback, useMemo } from 'react'
 import { useNavigate } from 'react-router-dom'
 import Hls, { type PlaylistLoaderConstructor } from 'hls.js'
 import type { EnrichedChannel } from '../hooks/useChannels'
@@ -6,6 +6,7 @@ import type { EpgProgram } from '../api/types'
 import { useEpg, useFavourites, useRecent } from '../hooks/useChannels'
 import { formatCountryDisplay } from '../util/country'
 import { LOGO_SIZE, logoUrl, handleLogoError } from '../util/logo'
+import { markPlayerLogoForTransition } from '../util/viewTransition'
 import { orderStreamsForPlayback, rankResolution } from '../util/resolution'
 import {
   getProxyStreamUrl,
@@ -79,6 +80,7 @@ interface FailureEvidence {
 export function VideoPlayer({ channel, allChannels, returnTo = '/' }: Props) {
   const videoRef = useRef<HTMLVideoElement>(null)
   const containerRef = useRef<HTMLDivElement>(null)
+  const playerLogoRef = useRef<HTMLImageElement>(null)
   const activeDrawerItemRef = useRef<HTMLButtonElement>(null)
   const hlsRef = useRef<Hls | null>(null)
   const navigate = useNavigate()
@@ -111,6 +113,13 @@ export function VideoPlayer({ channel, allChannels, returnTo = '/' }: Props) {
   const [showAudioMenu, setShowAudioMenu] = useState(false)
   const subtitleMenuRef = useRef<HTMLDivElement>(null)
   const audioMenuRef = useRef<HTMLDivElement>(null)
+
+  // Only the mount from a card's click is a view transition's "after" state;
+  // switching channels within an already-open player has none in flight.
+  useLayoutEffect(() => {
+    markPlayerLogoForTransition(playerLogoRef.current)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
 
   const isHudVisible = showHud || isBuffering
 
@@ -1578,6 +1587,7 @@ export function VideoPlayer({ channel, allChannels, returnTo = '/' }: Props) {
         <div className="player__info">
           {logoUrl(channel.logo) && (
             <img
+              ref={playerLogoRef}
               src={logoUrl(channel.logo)!}
               alt={channel.name}
               width={LOGO_SIZE}

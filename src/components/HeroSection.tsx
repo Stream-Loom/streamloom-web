@@ -4,6 +4,7 @@ import type { EnrichedChannel } from '../hooks/useChannels'
 import { formatCountryDisplay } from '../util/country'
 import { LOGO_SIZE, logoUrl, handleLogoError } from '../util/logo'
 import { prefetchPlaylist } from '../util/playlistPrefetch'
+import { prefersReducedMotion } from '../util/motion'
 import './HeroSection.css'
 
 interface Props {
@@ -15,9 +16,7 @@ export function HeroSection({ channels }: Props) {
   const [index, setIndex] = useState(0)
   // Auto-advancing content needs a way to stop it (vestibular safety); start
   // stopped for anyone who has already told the OS they don't want motion.
-  const [isPaused, setIsPaused] = useState(
-    () => typeof window !== 'undefined' && window.matchMedia?.('(prefers-reduced-motion: reduce)').matches,
-  )
+  const [isPaused, setIsPaused] = useState(prefersReducedMotion)
 
   // Rotate every 8 seconds across top 5 channels with streams & logos
   const heroChannels = channels.filter((c) => c.stream && logoUrl(c.logo)).slice(0, 5)

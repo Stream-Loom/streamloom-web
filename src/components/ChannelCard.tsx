@@ -7,6 +7,7 @@ import { formatCountryDisplay } from '../util/country'
 import { LOGO_SIZE, logoUrl, handleLogoError } from '../util/logo'
 import { preconnectChannel } from '../util/preconnect'
 import { prefetchPlaylist } from '../util/playlistPrefetch'
+import { navigateWithLogoTransition } from '../util/viewTransition'
 import './ChannelCard.css'
 
 interface Props {
@@ -24,6 +25,7 @@ export function ChannelCard({ channel, nowPlaying, size = 'medium', onWatch, pla
 
   const hasStream = !!channel.stream
   const fav = isFavourite(channel.id)
+  const logoRef = useRef<HTMLImageElement | null>(null)
 
   const handleClick = useCallback(() => {
     if (!hasStream) return
@@ -42,12 +44,14 @@ export function ChannelCard({ channel, nowPlaying, size = 'medium', onWatch, pla
         sessionStorage.removeItem('sl_active_playlist')
       } catch {}
     }
-    navigate(`/watch/${encodeURIComponent(channel.id)}`, {
-      state: {
-        playlist: hasMultipleInPlaylist ? playlist : undefined,
-        returnTo: returnPath,
-      },
-    })
+    navigateWithLogoTransition(logoRef.current, () =>
+      navigate(`/watch/${encodeURIComponent(channel.id)}`, {
+        state: {
+          playlist: hasMultipleInPlaylist ? playlist : undefined,
+          returnTo: returnPath,
+        },
+      }),
+    )
   }, [hasStream, channel, playlist, location.pathname, location.search, navigate, onWatch])
 
   // A short dwell, so a D-pad sweep along a row does not open a socket per card passed.
@@ -97,6 +101,7 @@ export function ChannelCard({ channel, nowPlaying, size = 'medium', onWatch, pla
         <div className="channel-card__thumb">
           {logoSrc ? (
             <img
+              ref={logoRef}
               src={logoSrc}
               alt={channel.name}
               width={LOGO_SIZE}
