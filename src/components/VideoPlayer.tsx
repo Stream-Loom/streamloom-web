@@ -1,4 +1,5 @@
 import { useEffect, useLayoutEffect, useRef, useState, useCallback, useMemo } from 'react'
+import { createPortal } from 'react-dom'
 import { useNavigate } from 'react-router-dom'
 import Hls, { type PlaylistLoaderConstructor } from 'hls.js'
 import type { EnrichedChannel } from '../hooks/useChannels'
@@ -29,6 +30,7 @@ import { preconnectChannel } from '../util/preconnect'
 import { HandoffLoader } from '../util/handoffLoader'
 import { MANIFEST_TIMEOUT_MS } from '../util/playlistPrefetch'
 import { MiniGuideRow } from './MiniGuideRow'
+import { useDocumentPip } from '../hooks/useDocumentPip'
 import './VideoPlayer.css'
 
 interface Props {
@@ -73,6 +75,7 @@ interface FailureEvidence {
 
 export function VideoPlayer({ channel, allChannels, returnTo = '/', epgChannelIds }: Props) {
   const videoRef = useRef<HTMLVideoElement>(null)
+  const videoHostRef = useRef<HTMLDivElement>(null)
   const containerRef = useRef<HTMLDivElement>(null)
   const playerLogoRef = useRef<HTMLImageElement>(null)
   const hlsRef = useRef<Hls | null>(null)
@@ -368,6 +371,62 @@ export function VideoPlayer({ channel, allChannels, returnTo = '/', epgChannelId
     resetHudTimer()
   }, [resetHudTimer])
 
+  // B9: Document PiP mini-player (desktop Chrome/Edge only — the hook feature-detects
+  // and `docPipSupported` stays false everywhere else, so the toggle button below never
+  // renders on phone, TV or Safari). Unlike the native video-PiP button above, this
+  // opens a real window we control, so it can carry zap buttons instead of just
+  // play/pause. Moves the actual <video> node into that window rather than mounting a
+  // second one, so playback (buffer, currentTime, the attached hls.js instance)
+  // survives the move.
+  const restoreVideoInPlace = useCallback(() => {
+    const video = videoRef.current
+    const host = videoHostRef.current
+    if (!video || !host) return
+    video.style.width = ''
+    video.style.height = ''
+    video.style.objectFit = ''
+    video.style.display = ''
+    // Reinsert as host's next sibling — its original JSX position — rather than
+    // into host itself: React still thinks of video as a sibling of host, not a
+    // child of it, and an `appendChild` into host here would leave that fiber
+    // pointing at a DOM node video is no longer directly under, which throws on
+    // the next unmount (removeChild on a node that isn't there any more).
+    host.insertAdjacentElement('afterend', video)
+  }, [])
+
+  const { isSupported: docPipSupported, pipWindow, open: openDocPip, close: closeDocPip } = useDocumentPip(restoreVideoInPlace)
+
+  // Runs the move-in when a window opens (and, redundantly but harmlessly, the
+  // move-back on close/unmount — the real move-back already happened synchronously in
+  // useDocumentPip's pagehide handler, above, so a browsing-context teardown never
+  // races a React effect for playback state; this cleanup just keeps the DOM tidy for
+  // paths that don't go through 'pagehide', like a StrictMode double-invoke).
+  useEffect(() => {
+    if (!pipWindow) return
+    const video = videoRef.current
+    if (!video) return
+    try {
+      pipWindow.document.body.appendChild(video)
+    } catch (err) {
+      // The window `open()` handed back wasn't actually usable (e.g. its document
+      // was already on its way out) — nothing to reparent into, so leave the video
+      // where it is rather than throwing out of a passive effect. Logged rather
+      // than swallowed: if this is where the mini-player is actually failing,
+      // this is the one place that would know why.
+      console.error('[document-pip] could not move the video into the mini-player window', err)
+      return
+    }
+    // Temporary diagnostic (remove once the reopen-after-back bug is confirmed
+    // fixed): confirms the reparent itself succeeded, as distinct from the window
+    // opening but nothing visibly landing in it.
+    console.log('[document-pip] video reparented into pip window')
+    video.style.width = '100%'
+    video.style.height = 'calc(100% - 44px)'
+    video.style.objectFit = 'contain'
+    video.style.display = 'block'
+    return restoreVideoInPlace
+  }, [pipWindow, restoreVideoInPlace])
+
   const showToast = useCallback((msg: string, duration = 2500) => {
     setToastMessage(msg)
     if (toastTimer.current) window.clearTimeout(toastTimer.current)
@@ -591,8 +650,23 @@ export function VideoPlayer({ channel, allChannels, returnTo = '/', epgChannelId
     }
     sessionStorage.setItem('sl_last_viewed', channel.id)
     ;(document.activeElement as HTMLElement)?.blur?.()
+    if (pipWindow) {
+      // Close the mini-player and move the reparented <video> node back to the
+      // main document ourselves, synchronously, right here — rather than
+      // leaving either to fire later. closeDocPip() is fire-and-forget
+      // (win.close() doesn't wait), so the async 'pagehide' handler that
+      // normally does this move isn't guaranteed to run before navigate()
+      // below unmounts this component; restoreVideoInPlace() is idempotent
+      // (no-ops if the node's already back) so calling it early here and
+      // again later from 'pagehide' or unmount is harmless. Skipping this
+      // step risks the exact removeChild() crash restoreVideoInPlace exists
+      // to avoid, since the video would still be parented under the closing
+      // PiP window's document when React tears this tree down.
+      closeDocPip()
+      restoreVideoInPlace()
+    }
     navigate(returnTo, { state: { targetChannelId: channel.id } })
-  }, [cancelCountdown, channel.id, returnTo, navigate, destroyHls])
+  }, [cancelCountdown, channel.id, returnTo, navigate, destroyHls, pipWindow, closeDocPip, restoreVideoInPlace])
 
   // The user's own choice to drop this channel from every list; undone in Settings.
   const handleHideChannel = useCallback(() => {
@@ -1394,6 +1468,7 @@ export function VideoPlayer({ channel, allChannels, returnTo = '/', epgChannelId
       onMouseMove={handleMouseMove}
       onTouchStart={handleMouseMove}
     >
+      <div className="player__video-host" ref={videoHostRef} />
       <video
         ref={videoRef}
         className="player__video"
@@ -1445,6 +1520,47 @@ export function VideoPlayer({ channel, allChannels, returnTo = '/', epgChannelId
         }}
         onClick={() => setShowHud((v) => !v)}
       />
+
+      {/* B9: the video itself has moved into the Document PiP window; this stands in
+          for it here so the main view isn't just a black rectangle with no way back. */}
+      {pipWindow && (
+        <div className="player__pip-placeholder">
+          <p className="player__connecting-title">Playing in mini-player</p>
+          <button className="player__overlay-btn" onClick={closeDocPip}>
+            Return here
+          </button>
+        </div>
+      )}
+
+      {pipWindow &&
+        createPortal(
+          <div className="player__pip-controls">
+            <button
+              onClick={goToPrevChannel}
+              disabled={allChannels.length <= 1}
+              aria-label="Previous channel"
+            >
+              ◀
+            </button>
+            <div className="player__pip-controls-info">
+              {logoUrl(channel.logo) && (
+                <img src={logoUrl(channel.logo)!} alt="" width={24} height={24} onError={handleLogoError} />
+              )}
+              <span>{channel.name}</span>
+            </div>
+            <button onClick={togglePlayPause} aria-label={isPlaying ? 'Pause' : 'Play'}>
+              {isPlaying ? '⏸' : '▶'}
+            </button>
+            <button
+              onClick={goToNextChannel}
+              disabled={allChannels.length <= 1}
+              aria-label="Next channel"
+            >
+              ▶
+            </button>
+          </div>,
+          pipWindow.document.body
+        )}
 
       {/* Buffering Indicator */}
       {isBuffering && !hasError && (
@@ -1822,13 +1938,51 @@ export function VideoPlayer({ channel, allChannels, returnTo = '/', epgChannelId
               </div>
 
               <button
-                className="player__action-btn"
+                className={`player__action-btn ${pipWindow ? 'player__action-btn--disabled' : ''}`}
+                disabled={Boolean(pipWindow)}
                 onClick={togglePiP}
-                title="Picture-in-Picture"
+                title={pipWindow ? 'Unavailable while the mini-player is open' : 'Picture-in-Picture'}
                 aria-label="Picture in Picture"
               >
                 ⧉
               </button>
+              {docPipSupported && (
+                <button
+                  className={`player__action-btn ${pipWindow ? 'player__action-btn--active' : ''}`}
+                  onClick={() => {
+                    // Temporary diagnostic (remove once the reopen-after-back bug is
+                    // confirmed fixed): four rounds of fixes have shipped for this bug
+                    // with no console output ever reported back, so there's no signal
+                    // yet on which of "click didn't fire" / "requestWindow rejected" /
+                    // "resolved but window is dead/invisible" / "video didn't reparent"
+                    // is actually happening. These four logs are meant to be checked in
+                    // devtools the next time this fails and pasted back.
+                    console.log('[document-pip] toggle clicked', { pipWindow: Boolean(pipWindow), docPipSupported })
+                    if (pipWindow) {
+                      closeDocPip()
+                      return
+                    }
+                    openDocPip({ width: 360, height: 220 }).then((win) => {
+                      if (!win) {
+                        showToast('Could not open the mini-player — try again in a moment')
+                        return
+                      }
+                      console.log('[document-pip] requestWindow() resolved', {
+                        closed: win.closed,
+                        outerWidth: win.outerWidth,
+                        outerHeight: win.outerHeight,
+                      })
+                    }).catch((err) => {
+                      console.error('[document-pip] requestWindow() failed', err)
+                      showToast('Could not open the mini-player — try again in a moment')
+                    })
+                  }}
+                  title={pipWindow ? 'Close mini-player' : 'Open mini-player with zap controls'}
+                  aria-label={pipWindow ? 'Close mini-player' : 'Open mini-player'}
+                >
+                  🗗
+                </button>
+              )}
               <button
                 className="player__action-btn"
                 onClick={toggleFullscreen}
