@@ -16,7 +16,7 @@
 | ⌨️ TV & Desktop Nav | Arrow keys for channel/row navigation, Enter to play, `/` to search, Esc to clear/back, Space, F, M |
 | 🖱️ Trackpad & Mouse | 2-finger horizontal trackpad inertia, mouse wheel horizontal category scroll, card hover states |
 | ⚡ Edge Performance | Cloudflare Pages Anycast edge distribution, Upstash Redis caching (ADR-0015) |
-| 🌐 Installable | Add to home screen from a web app manifest; no service worker, so every visit loads the live deploy (backend ADR-0044) |
+| 🌐 Installable | Add to home screen from a web app manifest; no service worker, so every visit loads the live deploy (backend ADR-0045) |
 | ⚙️ Settings | Data source indicators, low-latency mode toggle, cache management, shortcut reference |
 
 ---
@@ -29,7 +29,7 @@
 - **R2 snapshots** (ADR-0030) — the primary catalogue read path: immutable brotli objects behind a public hostname
 - **Upstash Redis** read-only edge cache (ADR-0015) — the fallback when R2 cannot serve the catalogue
 - **Supabase** — backend source of truth, synced into Redis (never called from the browser)
-- A static web app manifest for installability; HTTP caching (`public/_headers`) instead of a service worker (backend ADR-0044)
+- A static web app manifest for installability; HTTP caching (`public/_headers`) instead of a service worker (backend ADR-0045)
 
 ---
 

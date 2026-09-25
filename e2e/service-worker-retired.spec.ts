@@ -5,7 +5,7 @@ import { fileURLToPath } from 'node:url'
 import { killLoggedProcess, spawnLogged, waitUntilReady, type LoggedProcess } from './support/wranglerDev'
 
 /**
- * The site has no service worker (ADR-0044), and `public/sw.js` retires the one earlier
+ * The site has no service worker (ADR-0045), and `public/sw.js` retires the one earlier
  * builds installed. That worker answered every navigation from its own cache, so a new
  * deploy showed one visit late, and `/admin` never reached Cloudflare Access (the
  * 2026-09-23 incident). These specs build the real bundle and serve it with
