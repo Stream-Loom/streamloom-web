@@ -1,7 +1,6 @@
 import { defineConfig } from 'vite'
 import type { Plugin } from 'vite'
 import react from '@vitejs/plugin-react'
-import { VitePWA } from 'vite-plugin-pwa'
 
 interface EdgeStreamsPayload {
   channelId: string
@@ -443,77 +442,6 @@ export default defineConfig({
     react(),
     streamProxyPlugin(),
     cataloguePreloadPlugin(),
-    VitePWA({
-      registerType: 'autoUpdate',
-      includeAssets: ['favicon.ico', 'icons/*.png'],
-      manifest: {
-        name: 'StreamLoom',
-        short_name: 'StreamLoom',
-        description: 'Live TV & IPTV streaming, anywhere.',
-        theme_color: '#0a0a0f',
-        background_color: '#0a0a0f',
-        display: 'standalone',
-        start_url: '/',
-        icons: [
-          { src: '/icons/icon-192.png', sizes: '192x192', type: 'image/png' },
-          { src: '/icons/icon-512.png', sizes: '512x512', type: 'image/png' },
-          { src: '/icons/icon-512-maskable.png', sizes: '512x512', type: 'image/png', purpose: 'maskable' },
-        ],
-      },
-      workbox: {
-        navigateFallback: '/index.html',
-        // /api/ is excluded because it must always be live. /admin is excluded for a
-        // different reason: it sits behind Cloudflare Access, which only attaches its
-        // session cookie to a request that actually reaches Cloudflare's edge. Serving
-        // /admin's navigation from this cache (as navigateFallback otherwise would, with
-        // zero network round trip) skips that handshake entirely — the page still loads,
-        // but every fetch it makes looks unauthenticated. Found 2026-09-23: visiting the
-        // site first, then changing the address bar to /admin in the same tab, failed
-        // this way; a fresh tab with no service worker yet never had the problem. Do not
-        // re-add /admin here for offline support — the page has no offline-capable state
-        // to begin with (see src/pages/Admin.tsx), so there is nothing to gain.
-        navigateFallbackDenylist: [/^\/api\//, /^\/admin(?:$|[/?])/],
-        globPatterns: ['**/*.{js,css,html,ico,png,svg,woff2}'],
-        // The media engine (vendor-hls) is code-split behind the /watch route and
-        // kept out of install-time precache, so installing the worker never blocks
-        // on it. App.tsx prefetches it once a catalogue is on screen and the page is
-        // idle (not under Save-Data or on 2G), because the first channel opened
-        // otherwise waited on it; the runtime rule below caches it from then on.
-        globIgnores: ['**/vendor-hls-*.js'],
-        runtimeCaching: [
-          {
-            // Media engine chunk, fetched only when the player route opens.
-            urlPattern: /vendor-hls-[A-Za-z0-9_-]+\.js/i,
-            handler: 'CacheFirst',
-            options: {
-              cacheName: 'media-engine',
-              expiration: { maxEntries: 5, maxAgeSeconds: 31536000 },
-            },
-          },
-          {
-            // Channel icons from our own CDN. The origin already sends
-            // `Cache-Control: public, max-age=31536000, immutable` and purges the
-            // edge for replaced icons, so the SW mirrors that lifetime instead of
-            // the conservative 24h used for arbitrary third-party images below.
-            urlPattern: /^https:\/\/icons\.softarchium\.com\//i,
-            handler: 'CacheFirst',
-            options: {
-              cacheName: 'channel-icon-cdn',
-              expiration: { maxEntries: 1000, maxAgeSeconds: 31536000 },
-            },
-          },
-          {
-            // Cache other remote images (EPG art, third-party assets)
-            urlPattern: /\.(png|jpg|jpeg|webp|svg)$/i,
-            handler: 'CacheFirst',
-            options: {
-              cacheName: 'image-cache',
-              expiration: { maxEntries: 500, maxAgeSeconds: 86400 },
-            },
-          },
-        ],
-      },
-    }),
   ],
   resolve: {
     alias: { '@': '/src' },
