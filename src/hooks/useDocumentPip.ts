@@ -37,21 +37,21 @@ export function useDocumentPip(onWillClose?: () => void) {
       isOpeningRef.current = true
       let win: Window
       try {
-        // Call requestWindow() as the very first thing, nothing awaited ahead of
-        // it: Document PiP's requestWindow(), like window.open(), needs the click's
-        // transient user activation, and that activation doesn't reliably survive
-        // an await that can span a real task boundary. An earlier version of this
-        // function awaited a "wait for the previous window to finish closing"
-        // promise first — reasoned as a defence against reopening before an old
-        // window was fully gone, but that promise can resolve via a setTimeout
-        // fallback (util/documentPip.ts), a macrotask, not just a same-tick
-        // microtask, so on the very reopen path this bug report is about (close,
-        // then reopen a window later) that await was the one most likely to burn
-        // the click's activation and make requestWindow() silently reject. Per the
-        // WICG spec, requestWindow()'s own steps already close whatever window is
-        // still open (or closing) for this tab before opening the new one, so there
-        // was nothing that wait bought that the browser doesn't already handle on
-        // its own.
+        // A leftover window from a different VideoPlayer instance (the previous
+        // channel, closed via the app's own back button rather than the PiP
+        // window's own close) can still be this tab's live documentPictureInPicture
+        // window here — window.close() doesn't promise to be instant, and in
+        // practice requestWindow() reopening right after hasn't reliably produced
+        // a new window for that channel (confirmed still broken after removing an
+        // earlier awaited "wait for it to close" step, which was the previous
+        // theory). Force it closed now, synchronously, and immediately request the
+        // new one in the same call stack — nothing awaited in between — so this
+        // click's transient user activation carries straight through to
+        // requestWindow() either way.
+        // Temporary diagnostic (remove once the reopen-after-back bug is confirmed
+        // fixed): settles whether this branch is even reached on the actual repro.
+        console.log('[document-pip] dpip.window before open()', dpip.window)
+        if (dpip.window) dpip.window.close()
         win = await dpip.requestWindow(options)
       } finally {
         isOpeningRef.current = false

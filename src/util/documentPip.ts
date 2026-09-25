@@ -21,11 +21,11 @@ export function isDocumentPipSupported(): boolean {
 }
 
 /**
- * Closes a Document PiP window. Fire-and-forget on purpose: a future `requestWindow()`
- * call doesn't need to wait for this to finish — per the WICG spec, requestWindow()'s
- * own steps already close whatever tab-global PiP window is still open (or closing)
- * before opening the new one — and waiting here would only risk burning the transient
- * user activation the *next* open() call needs.
+ * Closes a Document PiP window. Fire-and-forget on purpose: awaiting a "did it
+ * actually finish" promise here, before a future `requestWindow()` call, previously
+ * risked burning the transient user activation that call needs (see
+ * useDocumentPip.ts). `open()` handles making sure any leftover window is gone right
+ * before it asks for a new one, synchronously — this function doesn't need to.
  */
 export function closeDocumentPipWindow(win: Window): void {
   win.close()

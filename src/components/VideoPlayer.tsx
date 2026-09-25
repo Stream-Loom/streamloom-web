@@ -416,6 +416,10 @@ export function VideoPlayer({ channel, allChannels, returnTo = '/', epgChannelId
       console.error('[document-pip] could not move the video into the mini-player window', err)
       return
     }
+    // Temporary diagnostic (remove once the reopen-after-back bug is confirmed
+    // fixed): confirms the reparent itself succeeded, as distinct from the window
+    // opening but nothing visibly landing in it.
+    console.log('[document-pip] video reparented into pip window')
     video.style.width = '100%'
     video.style.height = 'calc(100% - 44px)'
     video.style.objectFit = 'contain'
@@ -1946,12 +1950,28 @@ export function VideoPlayer({ channel, allChannels, returnTo = '/', epgChannelId
                 <button
                   className={`player__action-btn ${pipWindow ? 'player__action-btn--active' : ''}`}
                   onClick={() => {
+                    // Temporary diagnostic (remove once the reopen-after-back bug is
+                    // confirmed fixed): four rounds of fixes have shipped for this bug
+                    // with no console output ever reported back, so there's no signal
+                    // yet on which of "click didn't fire" / "requestWindow rejected" /
+                    // "resolved but window is dead/invisible" / "video didn't reparent"
+                    // is actually happening. These four logs are meant to be checked in
+                    // devtools the next time this fails and pasted back.
+                    console.log('[document-pip] toggle clicked', { pipWindow: Boolean(pipWindow), docPipSupported })
                     if (pipWindow) {
                       closeDocPip()
                       return
                     }
                     openDocPip({ width: 360, height: 220 }).then((win) => {
-                      if (!win) showToast('Could not open the mini-player — try again in a moment')
+                      if (!win) {
+                        showToast('Could not open the mini-player — try again in a moment')
+                        return
+                      }
+                      console.log('[document-pip] requestWindow() resolved', {
+                        closed: win.closed,
+                        outerWidth: win.outerWidth,
+                        outerHeight: win.outerHeight,
+                      })
                     }).catch((err) => {
                       console.error('[document-pip] requestWindow() failed', err)
                       showToast('Could not open the mini-player — try again in a moment')
