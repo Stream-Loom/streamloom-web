@@ -18,7 +18,7 @@ playwright-report
 blob-report
 
 # wrangler pages dev's local persistence state — e2e/workerd-smoke.spec.ts runs it against
-# e2e/support/workerd-smoke/, e2e/pwa-navigation.spec.ts against the real project build;
+# e2e/support/workerd-smoke/, e2e/service-worker-retired.spec.ts against the real project build;
 # never anything worth committing, same as node_modules
 .wrangler
 
