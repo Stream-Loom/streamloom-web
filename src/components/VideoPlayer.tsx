@@ -87,6 +87,7 @@ export function VideoPlayer({ channel, allChannels, returnTo = '/', epgChannelId
   const [isPlaying, setIsPlaying] = useState(true)
   const [isMuted, setIsMuted] = useState(false)
   const [isFullscreen, setIsFullscreen] = useState(false)
+  const [isZoomed, setIsZoomed] = useState(false)
   const [isBuffering, setIsBuffering] = useState(true)
   const [hasError, setHasError] = useState(false)
   const [networkIssue, setNetworkIssue] = useState(false)
@@ -296,8 +297,8 @@ export function VideoPlayer({ channel, allChannels, returnTo = '/', epgChannelId
     // iOS Safari has no element fullscreen at all; it exposes fullscreen
     // only on the <video> itself, natively (own play/pause/scrub HUD, no
     // fullscreenchange event or document.fullscreenElement either — tracked
-    // instead by the video's own webkitbeginfullscreen/webkitendfullscreen,
-    // wired below).
+    // instead by the video's own webkitbeginfullscreen/webkitendfullscreen
+    // listeners set up below).
     type IosVideo = HTMLVideoElement & {
       webkitEnterFullscreen?: () => void
       webkitExitFullscreen?: () => void
@@ -331,6 +332,11 @@ export function VideoPlayer({ channel, allChannels, returnTo = '/', epgChannelId
     }
   }, [])
 
+  const toggleZoom = useCallback(() => {
+    setIsZoomed((v) => !v)
+    resetHudTimer()
+  }, [resetHudTimer])
+
   useEffect(() => {
     function onFullscreenChange() {
       const isFs = Boolean(document.fullscreenElement)
@@ -346,6 +352,27 @@ export function VideoPlayer({ channel, allChannels, returnTo = '/', epgChannelId
     }
     document.addEventListener('fullscreenchange', onFullscreenChange)
     return () => document.removeEventListener('fullscreenchange', onFullscreenChange)
+  }, [])
+
+  // iOS Safari never fires 'fullscreenchange' for webkitEnterFullscreen — it's
+  // tracked only through these two events on the <video> itself. Without this,
+  // isFullscreen (and the button's icon) never reflects native fullscreen at all.
+  useEffect(() => {
+    const video = videoRef.current
+    if (!video) return
+    function onBegin() {
+      setIsFullscreen(true)
+    }
+    function onEnd() {
+      setIsFullscreen(false)
+      setShowHud(true)
+    }
+    video.addEventListener('webkitbeginfullscreen', onBegin)
+    video.addEventListener('webkitendfullscreen', onEnd)
+    return () => {
+      video.removeEventListener('webkitbeginfullscreen', onBegin)
+      video.removeEventListener('webkitendfullscreen', onEnd)
+    }
   }, [])
 
   const handleMouseMove = useCallback(() => {
@@ -1471,7 +1498,7 @@ export function VideoPlayer({ channel, allChannels, returnTo = '/', epgChannelId
       <div className="player__video-host" ref={videoHostRef} />
       <video
         ref={videoRef}
-        className="player__video"
+        className={`player__video${isZoomed ? ' player__video--zoomed' : ''}`}
         autoPlay
         playsInline
         onWaiting={() => {
@@ -1983,6 +2010,15 @@ export function VideoPlayer({ channel, allChannels, returnTo = '/', epgChannelId
                   🗗
                 </button>
               )}
+              <button
+                className={`player__action-btn ${isZoomed ? 'player__action-btn--active' : ''}`}
+                onClick={toggleZoom}
+                title={isZoomed ? 'Fit to screen' : 'Zoom to fill screen'}
+                aria-label={isZoomed ? 'Fit video to screen' : 'Zoom video to fill screen'}
+                aria-pressed={isZoomed}
+              >
+                {isZoomed ? '⊟' : '⛶'}
+              </button>
               <button
                 className="player__action-btn"
                 onClick={toggleFullscreen}

@@ -37,6 +37,13 @@
   z-index: 6;
 }
 
+/* Crops letterboxing to fill the viewport edge-to-edge, trading off the
+   cropped edges of the picture — most useful on phones playing a 16:9
+   stream in portrait, where 'contain' otherwise leaves large black bars. */
+.player__video--zoomed {
+  object-fit: cover;
+}
+
 /* Overlays (Buffering & Error) */
 .player__toast {
   position: absolute;
