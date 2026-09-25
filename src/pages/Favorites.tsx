@@ -8,7 +8,7 @@ import './Favorites.css'
 
 export function Favorites() {
   const location = useLocation()
-  const { channels, allChannels, loading } = useChannels()
+  const { channels, allChannels, epgChannelIds, loading } = useChannels()
   const { favouriteIds } = useFavourites()
   const { addRecent } = useRecent()
   const [search, setSearch] = useState('')
@@ -95,6 +95,7 @@ export function Favorites() {
             <ChannelCard
               key={channel.id}
               channel={channel}
+              epgChannelIds={epgChannelIds}
               playlist={filteredPlaylist}
               onWatch={(id) => addRecent(id)}
             />

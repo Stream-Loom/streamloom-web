@@ -14,6 +14,15 @@ interface Options {
  * - /: Instantly focus search bar
  * - Escape: Clear active filter / blur input
  */
+// A card's own DOM node (`[data-card="channel"]`) is no longer itself
+// focusable — the playable area and the favourite toggle are two separate
+// buttons inside it (W8) — so arrow nav focuses whichever of the two is
+// actually focusable, falling back to the card itself for anything else.
+function focusCard(card: HTMLElement) {
+  const target = card.querySelector<HTMLElement>('.channel-card__surface:not([disabled]), .channel-card__fav')
+  ;(target ?? card).focus()
+}
+
 export function useKeyboardNav(options?: Options) {
   useEffect(() => {
     function handleKeyDown(e: KeyboardEvent) {
@@ -36,6 +45,10 @@ export function useKeyboardNav(options?: Options) {
 
       // Escape: blur or clear filters
       if (e.key === 'Escape') {
+        // A modal <dialog> (e.g. the filter sheet) handles its own Escape —
+        // it only closes itself. Don't also let it fall through to here and
+        // wipe every active filter.
+        if (document.querySelector('dialog[open]')) return
         if (isInput) {
           activeEl?.blur()
           return
@@ -52,7 +65,7 @@ export function useKeyboardNav(options?: Options) {
             e.preventDefault()
             activeEl?.blur()
             const firstCard = document.querySelector<HTMLElement>('[data-card="channel"]')
-            firstCard?.focus()
+            if (firstCard) focusCard(firstCard)
           }
           return
         }
@@ -71,7 +84,7 @@ export function useKeyboardNav(options?: Options) {
         if (currentIndex === -1) {
           // If nothing is focused yet, focus the first card on any arrow press
           e.preventDefault()
-          cards[0]?.focus()
+          if (cards[0]) focusCard(cards[0])
           cards[0]?.scrollIntoView({ behavior: 'smooth', block: 'nearest', inline: 'nearest' })
           return
         }
@@ -82,14 +95,14 @@ export function useKeyboardNav(options?: Options) {
           e.preventDefault()
           const nextCard = cards[currentIndex + 1]
           if (nextCard) {
-            nextCard.focus()
+            focusCard(nextCard)
             nextCard.scrollIntoView({ behavior: 'smooth', block: 'nearest', inline: 'nearest' })
           }
         } else if (e.key === 'ArrowLeft') {
           e.preventDefault()
           const prevCard = cards[currentIndex - 1]
           if (prevCard) {
-            prevCard.focus()
+            focusCard(prevCard)
             prevCard.scrollIntoView({ behavior: 'smooth', block: 'nearest', inline: 'nearest' })
           }
         } else if (e.key === 'ArrowDown') {
@@ -113,7 +126,7 @@ export function useKeyboardNav(options?: Options) {
                 closest = c
               }
             }
-            closest.focus()
+            focusCard(closest)
             closest.scrollIntoView({ behavior: 'smooth', block: 'nearest', inline: 'nearest' })
           }
         } else if (e.key === 'ArrowUp') {
@@ -136,7 +149,7 @@ export function useKeyboardNav(options?: Options) {
                 closest = c
               }
             }
-            closest.focus()
+            focusCard(closest)
             closest.scrollIntoView({ behavior: 'smooth', block: 'nearest', inline: 'nearest' })
           } else {
             // Reached top row — jump to search bar or filter bar

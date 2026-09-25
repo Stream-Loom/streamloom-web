@@ -1,11 +1,11 @@
-import { useEffect, useRef, useState, useCallback, useMemo } from 'react'
+import { useEffect, useLayoutEffect, useRef, useState, useCallback, useMemo } from 'react'
 import { useNavigate } from 'react-router-dom'
 import Hls, { type PlaylistLoaderConstructor } from 'hls.js'
 import type { EnrichedChannel } from '../hooks/useChannels'
-import type { EpgProgram } from '../api/types'
 import { useEpg, useFavourites, useRecent } from '../hooks/useChannels'
-import { formatCountryDisplay } from '../util/country'
+import { getCurrentProgram, getNextProgram } from '../util/epgNow'
 import { LOGO_SIZE, logoUrl, handleLogoError } from '../util/logo'
+import { markPlayerLogoForTransition } from '../util/viewTransition'
 import { orderStreamsForPlayback, rankResolution } from '../util/resolution'
 import {
   getProxyStreamUrl,
@@ -28,12 +28,15 @@ import { rememberBandwidth, startingBandwidth } from '../util/bandwidth'
 import { preconnectChannel } from '../util/preconnect'
 import { HandoffLoader } from '../util/handoffLoader'
 import { MANIFEST_TIMEOUT_MS } from '../util/playlistPrefetch'
+import { MiniGuideRow } from './MiniGuideRow'
 import './VideoPlayer.css'
 
 interface Props {
   channel: EnrichedChannel
   allChannels: EnrichedChannel[]
   returnTo?: string
+  /** Channel ids with a published schedule (epg/ids.json). Gates the mini-guide's now/next fetch. */
+  epgChannelIds?: Set<string>
 }
 
 export interface MediaTrackItem {
@@ -41,14 +44,6 @@ export interface MediaTrackItem {
   name: string
   lang?: string
   type?: string
-}
-
-function getCurrentProgram(programs: EpgProgram[], nowMs: number): EpgProgram | undefined {
-  return programs.find((p) => {
-    const start = new Date(p.start_time).getTime()
-    const end = new Date(p.end_time).getTime()
-    return nowMs >= start && nowMs < end
-  })
 }
 
 /*
@@ -76,9 +71,10 @@ interface FailureEvidence {
   verdicts: Map<number, FailureClass>
 }
 
-export function VideoPlayer({ channel, allChannels, returnTo = '/' }: Props) {
+export function VideoPlayer({ channel, allChannels, returnTo = '/', epgChannelIds }: Props) {
   const videoRef = useRef<HTMLVideoElement>(null)
   const containerRef = useRef<HTMLDivElement>(null)
+  const playerLogoRef = useRef<HTMLImageElement>(null)
   const hlsRef = useRef<Hls | null>(null)
   const navigate = useNavigate()
   const { programs } = useEpg(channel.id)
@@ -110,6 +106,13 @@ export function VideoPlayer({ channel, allChannels, returnTo = '/' }: Props) {
   const [showAudioMenu, setShowAudioMenu] = useState(false)
   const subtitleMenuRef = useRef<HTMLDivElement>(null)
   const audioMenuRef = useRef<HTMLDivElement>(null)
+
+  // Only the mount from a card's click is a view transition's "after" state;
+  // switching channels within an already-open player has none in flight.
+  useLayoutEffect(() => {
+    markPlayerLogoForTransition(playerLogoRef.current)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
 
   const isHudVisible = showHud || isBuffering
 
@@ -287,6 +290,26 @@ export function VideoPlayer({ channel, allChannels, returnTo = '/' }: Props) {
     const container = containerRef.current
     if (!container) return
 
+    // iOS Safari has no element fullscreen at all; it exposes fullscreen
+    // only on the <video> itself, natively (own play/pause/scrub HUD, no
+    // fullscreenchange event or document.fullscreenElement either — tracked
+    // instead by the video's own webkitbeginfullscreen/webkitendfullscreen,
+    // wired below).
+    type IosVideo = HTMLVideoElement & {
+      webkitEnterFullscreen?: () => void
+      webkitExitFullscreen?: () => void
+      webkitDisplayingFullscreen?: boolean
+    }
+    const video = videoRef.current as IosVideo | null
+    if (!container.requestFullscreen && video?.webkitEnterFullscreen) {
+      if (video.webkitDisplayingFullscreen) {
+        video.webkitExitFullscreen?.()
+      } else {
+        video.webkitEnterFullscreen()
+      }
+      return
+    }
+
     if (!document.fullscreenElement) {
       container.requestFullscreen().then(() => {
         setIsFullscreen(true)
@@ -294,6 +317,8 @@ export function VideoPlayer({ channel, allChannels, returnTo = '/' }: Props) {
         hideHudTimer.current = window.setTimeout(() => {
           setShowHud(false)
         }, 1200)
+        const lock = screen.orientation?.lock
+        if (lock) lock.call(screen.orientation, 'landscape').catch(() => {})
       }).catch(() => {})
     } else {
       document.exitFullscreen().then(() => {
@@ -1196,14 +1221,43 @@ export function VideoPlayer({ channel, allChannels, returnTo = '/' }: Props) {
         setShowChannelList(false)
         return
       }
-      // Don't hijack vertical arrows when browsing the channel list drawer
-      if (e.key === 'ArrowUp' || e.key === 'ArrowDown') {
+      // Don't hijack any arrow key when browsing the channel list drawer —
+      // it's the drawer's own list to navigate, not the HUD's.
+      if (
+        e.key === 'ArrowUp' ||
+        e.key === 'ArrowDown' ||
+        e.key === 'ArrowLeft' ||
+        e.key === 'ArrowRight'
+      ) {
         return
       }
     }
 
+    // TV remote model: with the HUD hidden, up/down are a dedicated channel-zap
+    // D-pad; with it showing, all four arrows move focus between HUD controls
+    // instead, so the controls are reachable at all.
+    const isArrowKey =
+      e.key === 'ArrowUp' || e.key === 'ArrowDown' || e.key === 'ArrowLeft' || e.key === 'ArrowRight'
+    const hudControls = () =>
+      Array.from(
+        containerRef.current?.querySelectorAll<HTMLElement>(
+          '.player__hud button, .player__hud [tabindex]:not([tabindex="-1"])'
+        ) ?? []
+      ).filter((el) => el.offsetParent !== null)
+
+    if (isHudVisible && isArrowKey) {
+      e.preventDefault()
+      const controls = hudControls()
+      if (controls.length) {
+        const delta = e.key === 'ArrowUp' || e.key === 'ArrowLeft' ? -1 : 1
+        const current = controls.indexOf(document.activeElement as HTMLElement)
+        const next = current === -1 ? (delta === 1 ? 0 : controls.length - 1) : (current + delta + controls.length) % controls.length
+        controls[next].focus()
+      }
+      return
+    }
+
     if (
-      e.key === 'ArrowLeft' ||
       e.key === 'ArrowUp' ||
       e.key === '[' ||
       e.key === 'p' ||
@@ -1215,7 +1269,6 @@ export function VideoPlayer({ channel, allChannels, returnTo = '/' }: Props) {
       e.preventDefault()
       goToPrevChannel()
     } else if (
-      e.key === 'ArrowRight' ||
       e.key === 'ArrowDown' ||
       e.key === ']' ||
       e.key === 'n' ||
@@ -1230,6 +1283,9 @@ export function VideoPlayer({ channel, allChannels, returnTo = '/' }: Props) {
       e.preventDefault()
       handleBack()
     } else if (e.key === ' ') {
+      // A focused HUD button owns Space itself (native activation); only
+      // treat it as play/pause when nothing in the HUD has focus.
+      if (isHudVisible && hudControls().includes(document.activeElement as HTMLElement)) return
       e.preventDefault()
       togglePlayPause()
     } else if (e.key === 'f' || e.key === 'F') {
@@ -1244,11 +1300,15 @@ export function VideoPlayer({ channel, allChannels, returnTo = '/' }: Props) {
     } else if (e.key === 'a' || e.key === 'A') {
       e.preventDefault()
       cycleAudioTracks()
+    } else if (e.key === 'g' || e.key === 'G') {
+      e.preventDefault()
+      setShowChannelList((v) => !v)
     }
   }, [
     showChannelList,
     showSubtitleMenu,
     showAudioMenu,
+    isHudVisible,
     handleMouseMove,
     goToPrevChannel,
     goToNextChannel,
@@ -1273,13 +1333,59 @@ export function VideoPlayer({ channel, allChannels, returnTo = '/' }: Props) {
     return () => window.removeEventListener('keydown', handleKeyDown)
   }, [])
 
-  const [currentTimestamp] = useState(() => Date.now())
+  const [currentTimestamp, setCurrentTimestamp] = useState(() => Date.now())
+  useEffect(() => {
+    const tick = () => setCurrentTimestamp(Date.now())
+    tick()
+    const id = window.setInterval(tick, 30_000)
+    return () => window.clearInterval(id)
+  }, [channel.id])
   const nowPlaying = useMemo(() => getCurrentProgram(programs, currentTimestamp), [programs, currentTimestamp])
-  const nextProgram = useMemo(
-    () => programs.find((p) => new Date(p.start_time).getTime() > currentTimestamp),
-    [programs, currentTimestamp]
-  )
+  const nextProgram = useMemo(() => getNextProgram(programs, currentTimestamp), [programs, currentTimestamp])
   const fav = isFavourite(channel.id)
+
+  // Mini-guide row order (S3): the playing channel first, then the rest of the
+  // playlist in their existing order, wrapping around.
+  const guideChannels = useMemo(() => {
+    const idx = allChannels.findIndex((c) => c.id === channel.id)
+    if (idx <= 0) return allChannels
+    return [...allChannels.slice(idx), ...allChannels.slice(0, idx)]
+  }, [allChannels, channel.id])
+
+  const handleGuidePick = useCallback(
+    (picked: EnrichedChannel) => {
+      setShowChannelList(false)
+      targetChannelIdRef.current = picked.id
+      switchChannelCleanly(picked)
+    },
+    [switchChannelCleanly],
+  )
+
+  // Lock-screen, hardware-key and PiP transport controls. previous/next map
+  // to zapping, same as the keyboard shortcuts.
+  useEffect(() => {
+    if (!('mediaSession' in navigator)) return
+    const artwork = logoUrl(channel.logo)
+    navigator.mediaSession.metadata = new MediaMetadata({
+      title: channel.name,
+      artist: nowPlaying?.title ?? '',
+      artwork: artwork ? [{ src: artwork, sizes: `${LOGO_SIZE}x${LOGO_SIZE}`, type: 'image/webp' }] : [],
+    })
+    navigator.mediaSession.setActionHandler('play', togglePlayPause)
+    navigator.mediaSession.setActionHandler('pause', togglePlayPause)
+    navigator.mediaSession.setActionHandler('previoustrack', goToPrevChannel)
+    navigator.mediaSession.setActionHandler('nexttrack', goToNextChannel)
+    return () => {
+      navigator.mediaSession.setActionHandler('play', null)
+      navigator.mediaSession.setActionHandler('pause', null)
+      navigator.mediaSession.setActionHandler('previoustrack', null)
+      navigator.mediaSession.setActionHandler('nexttrack', null)
+    }
+  }, [channel.id, channel.name, channel.logo, nowPlaying?.title, togglePlayPause, goToPrevChannel, goToNextChannel])
+
+  useEffect(() => {
+    if ('mediaSession' in navigator) navigator.mediaSession.playbackState = isPlaying ? 'playing' : 'paused'
+  }, [isPlaying])
 
   return (
     <div
@@ -1402,7 +1508,7 @@ export function VideoPlayer({ channel, allChannels, returnTo = '/' }: Props) {
 
       {/* Toast message */}
       {toastMessage && (
-        <div className="player__toast">
+        <div className="player__toast" role="status" aria-live="polite">
           <span>⚡</span>
           <span>{toastMessage}</span>
         </div>
@@ -1487,6 +1593,7 @@ export function VideoPlayer({ channel, allChannels, returnTo = '/' }: Props) {
         <div className="player__info">
           {logoUrl(channel.logo) && (
             <img
+              ref={playerLogoRef}
               src={logoUrl(channel.logo)!}
               alt={channel.name}
               width={LOGO_SIZE}
@@ -1735,41 +1842,22 @@ export function VideoPlayer({ channel, allChannels, returnTo = '/' }: Props) {
         </div>
       </div>
 
-      {/* Side Channel Switcher Drawer */}
+      {/* Mini-guide (S3): logo, name, now/next per row, starting at the playing channel */}
       {showChannelList && (
         <div className="player__drawer glass">
           <div className="player__drawer-header">
-            <h3>Playlist Channels ({allChannels.length})</h3>
-            <button onClick={() => setShowChannelList(false)} aria-label="Close drawer">✕</button>
+            <h3>Guide ({guideChannels.length})</h3>
+            <button onClick={() => setShowChannelList(false)} aria-label="Close guide">✕</button>
           </div>
           <div className="player__drawer-list">
-            {allChannels.map((c) => (
-              <div
+            {guideChannels.map((c) => (
+              <MiniGuideRow
                 key={c.id}
-                className={`player__drawer-item ${c.id === channel.id ? 'player__drawer-item--active' : ''}`}
-                onClick={() => {
-                  setShowChannelList(false)
-                  targetChannelIdRef.current = c.id
-                  switchChannelCleanly(c)
-                }}
-              >
-                {logoUrl(c.logo) ? (
-                  <img
-                    src={logoUrl(c.logo)!}
-                    alt={c.name}
-                    width={LOGO_SIZE}
-                    height={LOGO_SIZE}
-                    loading="lazy"
-                    decoding="async"
-                    onError={handleLogoError}
-                    className="player__drawer-logo"
-                  />
-                ) : (
-                  <div className="player__drawer-initials">{c.name.slice(0, 2).toUpperCase()}</div>
-                )}
-                <span className="player__drawer-name">{c.name}</span>
-                {c.country && <span className="player__drawer-badge">{formatCountryDisplay(c.country)}</span>}
-              </div>
+                channel={c}
+                active={c.id === channel.id}
+                hasSchedule={epgChannelIds?.has(c.id) ?? false}
+                onPick={handleGuidePick}
+              />
             ))}
           </div>
         </div>
@@ -1777,7 +1865,7 @@ export function VideoPlayer({ channel, allChannels, returnTo = '/' }: Props) {
 
       {/* Controls hint */}
       <p className="player__hint">
-        ← / → switch channel · Space play/pause · M mute · C subtitles · A audio · F fullscreen · Esc return
+        ← / → switch channel · G guide · Space play/pause · M mute · C subtitles · A audio · F fullscreen · Esc return
       </p>
     </div>
   )

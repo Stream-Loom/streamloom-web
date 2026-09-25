@@ -35,6 +35,12 @@
     "cacheControl": "public, max-age=31536000, immutable",
     "body": "[\"AlphaNews.in\",\"GammaWorld.uk\"]"
   },
+  "catalogue/g1757000000000/epg/summary.json.br": {
+    "contentType": "application/json",
+    "contentEncoding": "br",
+    "cacheControl": "public, max-age=31536000, immutable",
+    "body": "[[\"AlphaNews.in\",[[548067,60,\"Morning News\"],[548127,30,\"Bulletin\"]]],[\"GammaWorld.uk\",[[548097,60,\"World Report\"]]]]"
+  },
   "catalogue/g1757000000000/streams.json.br": {
     "contentType": "application/json",
     "contentEncoding": "br",
