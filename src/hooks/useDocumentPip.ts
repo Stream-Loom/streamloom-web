@@ -33,13 +33,18 @@ export function useDocumentPip(onWillClose?: () => void) {
     async (options?: { width?: number; height?: number }) => {
       if (!isSupported || isOpeningRef.current) return null
       const dpip = window.documentPictureInPicture!
-      if (dpip.window) {
-        dpip.window.focus()
-        return dpip.window
-      }
       isOpeningRef.current = true
       let win: Window
       try {
+        // Always ask, rather than checking `dpip.window` and short-circuiting to a
+        // `focus()` on it first: that check used to skip `setPipWindow` entirely when
+        // it hit, so a stale-but-still-truthy `dpip.window` (the browser hadn't yet
+        // cleared it from the *previous* instance's window, closed on the way here via
+        // the app's own back button) left this hook's state stuck at null forever —
+        // the toggle button kept offering "open" and every click silently focused a
+        // dead window instead. `requestWindow()` already reuses the existing window
+        // per spec when one is genuinely still open for this tab, so there was nothing
+        // the manual check did that asking again doesn't.
         win = await dpip.requestWindow(options)
       } finally {
         isOpeningRef.current = false
