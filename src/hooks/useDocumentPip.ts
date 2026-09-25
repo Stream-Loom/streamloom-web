@@ -1,10 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import {
-  closeDocumentPipWindow,
-  copyStylesInto,
-  isDocumentPipSupported,
-  waitForPipWindowToClose,
-} from '../util/documentPip'
+import { closeDocumentPipWindow, copyStylesInto, isDocumentPipSupported } from '../util/documentPip'
 
 /**
  * Opens and tracks a Document Picture-in-Picture window. Doesn't move any content
@@ -42,14 +37,21 @@ export function useDocumentPip(onWillClose?: () => void) {
       isOpeningRef.current = true
       let win: Window
       try {
-        // Wait for any window THIS TAB was in the middle of closing (e.g. the
-        // previous channel's mini-player, torn down when its VideoPlayer unmounted
-        // on the app's own back button) to actually finish first. There's at most
-        // one Document PiP window per tab — a browser-level constraint, not
-        // something this hook's own instance can reason about alone — and asking
-        // for a new one before the old one is really gone hands back that same
-        // dying window (nothing then visibly opens) or throws outright.
-        await waitForPipWindowToClose()
+        // Call requestWindow() as the very first thing, nothing awaited ahead of
+        // it: Document PiP's requestWindow(), like window.open(), needs the click's
+        // transient user activation, and that activation doesn't reliably survive
+        // an await that can span a real task boundary. An earlier version of this
+        // function awaited a "wait for the previous window to finish closing"
+        // promise first — reasoned as a defence against reopening before an old
+        // window was fully gone, but that promise can resolve via a setTimeout
+        // fallback (util/documentPip.ts), a macrotask, not just a same-tick
+        // microtask, so on the very reopen path this bug report is about (close,
+        // then reopen a window later) that await was the one most likely to burn
+        // the click's activation and make requestWindow() silently reject. Per the
+        // WICG spec, requestWindow()'s own steps already close whatever window is
+        // still open (or closing) for this tab before opening the new one, so there
+        // was nothing that wait bought that the browser doesn't already handle on
+        // its own.
         win = await dpip.requestWindow(options)
       } finally {
         isOpeningRef.current = false

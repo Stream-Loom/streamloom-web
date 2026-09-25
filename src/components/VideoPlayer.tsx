@@ -646,8 +646,23 @@ export function VideoPlayer({ channel, allChannels, returnTo = '/', epgChannelId
     }
     sessionStorage.setItem('sl_last_viewed', channel.id)
     ;(document.activeElement as HTMLElement)?.blur?.()
+    if (pipWindow) {
+      // Close the mini-player and move the reparented <video> node back to the
+      // main document ourselves, synchronously, right here — rather than
+      // leaving either to fire later. closeDocPip() is fire-and-forget
+      // (win.close() doesn't wait), so the async 'pagehide' handler that
+      // normally does this move isn't guaranteed to run before navigate()
+      // below unmounts this component; restoreVideoInPlace() is idempotent
+      // (no-ops if the node's already back) so calling it early here and
+      // again later from 'pagehide' or unmount is harmless. Skipping this
+      // step risks the exact removeChild() crash restoreVideoInPlace exists
+      // to avoid, since the video would still be parented under the closing
+      // PiP window's document when React tears this tree down.
+      closeDocPip()
+      restoreVideoInPlace()
+    }
     navigate(returnTo, { state: { targetChannelId: channel.id } })
-  }, [cancelCountdown, channel.id, returnTo, navigate, destroyHls])
+  }, [cancelCountdown, channel.id, returnTo, navigate, destroyHls, pipWindow, closeDocPip, restoreVideoInPlace])
 
   // The user's own choice to drop this channel from every list; undone in Settings.
   const handleHideChannel = useCallback(() => {

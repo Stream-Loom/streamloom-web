@@ -21,34 +21,14 @@ export function isDocumentPipSupported(): boolean {
 }
 
 /**
- * There is at most one Document PiP window per tab — it's a browser-level singleton,
- * not something scoped to whichever component happened to open it. Closing one and
- * immediately requesting a new one (leaving the Watch route via the app's own back
- * button, then reopening the mini-player on a different channel a moment later) needs
- * the first window's close to actually finish first: `window.close()` on it isn't
- * guaranteed synchronous, and asking for a new window before it has really gone either
- * hands back that same dying window (an inert one nothing then renders into) or throws.
- * Module-level, not per-hook-instance, because the constraint itself is tab-global and
- * must survive whichever component happened to be the one that opened the last window.
+ * Closes a Document PiP window. Fire-and-forget on purpose: a future `requestWindow()`
+ * call doesn't need to wait for this to finish — per the WICG spec, requestWindow()'s
+ * own steps already close whatever tab-global PiP window is still open (or closing)
+ * before opening the new one — and waiting here would only risk burning the transient
+ * user activation the *next* open() call needs.
  */
-let closing: Promise<void> | null = null
-
-/** Closes a Document PiP window and returns a promise that resolves once it's actually gone. */
-export function closeDocumentPipWindow(win: Window): Promise<void> {
-  closing = new Promise((resolve) => {
-    const done = () => resolve()
-    win.addEventListener('pagehide', done, { once: true })
-    // Belt-and-braces: a programmatic close() isn't contractually guaranteed to fire
-    // pagehide on every browser/version, so don't let a future open() wait forever.
-    setTimeout(done, 500)
-  })
+export function closeDocumentPipWindow(win: Window): void {
   win.close()
-  return closing
-}
-
-/** Resolves once any Document PiP window this tab was closing has actually finished closing. */
-export async function waitForPipWindowToClose(): Promise<void> {
-  if (closing) await closing
 }
 
 /** Copies the page's stylesheets into a PiP window so moved/portalled content keeps its styling. */
