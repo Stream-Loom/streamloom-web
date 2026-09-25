@@ -2,7 +2,7 @@ import { spawn, type ChildProcess, type SpawnOptions } from 'node:child_process'
 
 /**
  * Shared helpers for specs that spawn a real `wrangler pages dev` process
- * (`workerd-smoke.spec.ts`, `pwa-navigation.spec.ts`) — polling for readiness, capturing its
+ * (`workerd-smoke.spec.ts`, `service-worker-retired.spec.ts`) — polling for readiness, capturing its
  * output for a failure message, and a teardown that actually reaches the real server. Previously
  * duplicated near-verbatim in both specs; extracted here so a fix to any of it (a poll interval,
  * a timeout message, the kill reliability below) only has to be made once.

@@ -39,7 +39,7 @@ StreamLoom Web is the browser-native Progressive Web App (PWA) companion to the 
 - **Backend & Data**:
   - `@supabase/supabase-js` v2 (backend only - never called from the browser)
   - Upstash Redis REST API (read-only edge catalogue caching via ADR-0015)
-- **PWA & Offline**: `vite-plugin-pwa`, Workbox
+- **Installability**: a static `public/manifest.webmanifest`; no service worker (backend ADR-0044)
 - **Linter**: `oxlint` (Rust-based ultra-fast linter)
 - **Edge Deployment**: Cloudflare Pages with Cloudflare Pages Functions (`functions/api/proxy.ts`)
 

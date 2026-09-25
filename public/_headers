@@ -12,11 +12,8 @@
 /manifest.webmanifest
   Cache-Control: public, max-age=86400
 
-# The service worker script itself must never sit in the browser's HTTP cache: a fix that
-# changes its routing (like excluding /admin from the cache-only navigation fallback below,
-# see vite.config.ts) needs the browser's next update check to actually fetch the new bytes.
-# Modern browsers already bypass the HTTP cache for this file by default (updateViaCache:
-# "imports"), so this is belt-and-braces, not the only thing preventing a stale worker.
+# The retired service worker's replacement (ADR-0044). A browser still running the old
+# worker must fetch these bytes on its next update check, not an HTTP-cached copy.
 /sw.js
   Cache-Control: no-cache
 
