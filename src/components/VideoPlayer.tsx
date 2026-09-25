@@ -405,7 +405,17 @@ export function VideoPlayer({ channel, allChannels, returnTo = '/', epgChannelId
     if (!pipWindow) return
     const video = videoRef.current
     if (!video) return
-    pipWindow.document.body.appendChild(video)
+    try {
+      pipWindow.document.body.appendChild(video)
+    } catch (err) {
+      // The window `open()` handed back wasn't actually usable (e.g. its document
+      // was already on its way out) — nothing to reparent into, so leave the video
+      // where it is rather than throwing out of a passive effect. Logged rather
+      // than swallowed: if this is where the mini-player is actually failing,
+      // this is the one place that would know why.
+      console.error('[document-pip] could not move the video into the mini-player window', err)
+      return
+    }
     video.style.width = '100%'
     video.style.height = 'calc(100% - 44px)'
     video.style.objectFit = 'contain'
@@ -1920,7 +1930,18 @@ export function VideoPlayer({ channel, allChannels, returnTo = '/', epgChannelId
               {docPipSupported && (
                 <button
                   className={`player__action-btn ${pipWindow ? 'player__action-btn--active' : ''}`}
-                  onClick={() => (pipWindow ? closeDocPip() : openDocPip({ width: 360, height: 220 }))}
+                  onClick={() => {
+                    if (pipWindow) {
+                      closeDocPip()
+                      return
+                    }
+                    openDocPip({ width: 360, height: 220 }).then((win) => {
+                      if (!win) showToast('Could not open the mini-player — try again in a moment')
+                    }).catch((err) => {
+                      console.error('[document-pip] requestWindow() failed', err)
+                      showToast('Could not open the mini-player — try again in a moment')
+                    })
+                  }}
                   title={pipWindow ? 'Close mini-player' : 'Open mini-player with zap controls'}
                   aria-label={pipWindow ? 'Close mini-player' : 'Open mini-player'}
                 >

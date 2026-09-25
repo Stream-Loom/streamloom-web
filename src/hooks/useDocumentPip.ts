@@ -1,5 +1,10 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { copyStylesInto, isDocumentPipSupported } from '../util/documentPip'
+import {
+  closeDocumentPipWindow,
+  copyStylesInto,
+  isDocumentPipSupported,
+  waitForPipWindowToClose,
+} from '../util/documentPip'
 
 /**
  * Opens and tracks a Document Picture-in-Picture window. Doesn't move any content
@@ -26,7 +31,8 @@ export function useDocumentPip(onWillClose?: () => void) {
   }, [onWillClose])
 
   const close = useCallback(() => {
-    pipWindowRef.current?.close()
+    const win = pipWindowRef.current
+    if (win) void closeDocumentPipWindow(win)
   }, [])
 
   const open = useCallback(
@@ -36,15 +42,14 @@ export function useDocumentPip(onWillClose?: () => void) {
       isOpeningRef.current = true
       let win: Window
       try {
-        // Always ask, rather than checking `dpip.window` and short-circuiting to a
-        // `focus()` on it first: that check used to skip `setPipWindow` entirely when
-        // it hit, so a stale-but-still-truthy `dpip.window` (the browser hadn't yet
-        // cleared it from the *previous* instance's window, closed on the way here via
-        // the app's own back button) left this hook's state stuck at null forever —
-        // the toggle button kept offering "open" and every click silently focused a
-        // dead window instead. `requestWindow()` already reuses the existing window
-        // per spec when one is genuinely still open for this tab, so there was nothing
-        // the manual check did that asking again doesn't.
+        // Wait for any window THIS TAB was in the middle of closing (e.g. the
+        // previous channel's mini-player, torn down when its VideoPlayer unmounted
+        // on the app's own back button) to actually finish first. There's at most
+        // one Document PiP window per tab — a browser-level constraint, not
+        // something this hook's own instance can reason about alone — and asking
+        // for a new one before the old one is really gone hands back that same
+        // dying window (nothing then visibly opens) or throws outright.
+        await waitForPipWindowToClose()
         win = await dpip.requestWindow(options)
       } finally {
         isOpeningRef.current = false
@@ -73,7 +78,8 @@ export function useDocumentPip(onWillClose?: () => void) {
   // makes sure the window itself doesn't outlive the component.
   useEffect(() => {
     return () => {
-      pipWindowRef.current?.close()
+      const win = pipWindowRef.current
+      if (win) void closeDocumentPipWindow(win)
     }
   }, [])
 
