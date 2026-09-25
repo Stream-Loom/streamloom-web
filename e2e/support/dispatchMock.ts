@@ -9,7 +9,7 @@ import http from 'node:http'
  */
 
 export const DISPATCH_MOCK_PORT = 5197
-export const DISPATCH_MOCK_URL = `http://127.0.0.1:${DISPATCH_MOCK_PORT}/repos/Stream-Loom/streamloom-backend/dispatches`
+export const DISPATCH_MOCK_URL = `http://127.0.0.1:${DISPATCH_MOCK_PORT}/repos/StreamLoomBackEnd/streamloom-backend/dispatches`
 
 export interface DispatchMockRequest {
   body: unknown

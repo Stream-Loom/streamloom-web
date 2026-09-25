@@ -1,6 +1,6 @@
 /**
  * Cloudflare Pages Function: /api/picks/custom-channels — the admin write path for hand-added
- * channels (WO-21; backend counterpart in `Stream-Loom/streamloom-backend` PR #43).
+ * channels (WO-21; backend counterpart in `StreamLoomBackEnd/streamloom-backend` PR #43).
  *
  *   GET        read the stored document and its ETag (for the editor)
  *   PUT | POST replace it whole, with an If-Match ETag

@@ -35,7 +35,7 @@ const ENV_VARS = { CF_ACCESS_TEAM_DOMAIN: TEAM, CF_ACCESS_AUD: AUD }
 
 const CHANNELS_URL = 'https://iptv-org.github.io/api/channels.json'
 const BLOCKLIST_URL = 'https://iptv-org.github.io/api/blocklist.json'
-const DISPATCH_URL = 'https://api.github.com/repos/Stream-Loom/streamloom-backend/dispatches'
+const DISPATCH_URL = 'https://api.github.com/repos/StreamLoomBackEnd/streamloom-backend/dispatches'
 
 /** A small stand-in for the 31K-row upstream list, with one of each interesting flag. */
 const UPSTREAM_CHANNELS = [

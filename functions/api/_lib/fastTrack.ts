@@ -15,7 +15,7 @@
  * the identity card a little longer", never "the save did not happen".
  */
 
-const REPO = 'Stream-Loom/streamloom-backend'
+const REPO = 'StreamLoomBackEnd/streamloom-backend'
 const DISPATCH_URL = `https://api.github.com/repos/${REPO}/dispatches`
 const EVENT_TYPE = 'fast-track-pick'
 
