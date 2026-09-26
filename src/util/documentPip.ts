@@ -21,11 +21,11 @@ export function isDocumentPipSupported(): boolean {
 }
 
 /**
- * Closes a Document PiP window. Fire-and-forget on purpose: awaiting a "did it
- * actually finish" promise here, before a future `requestWindow()` call, previously
- * risked burning the transient user activation that call needs (see
- * useDocumentPip.ts). `open()` handles making sure any leftover window is gone right
- * before it asks for a new one, synchronously — this function doesn't need to.
+ * Asks a Document PiP window to close. `window.close()` is asynchronous (Chrome
+ * schedules it; `pagehide` and the window's destruction come later), so callers must
+ * finish their own teardown before calling this, never after waiting on it. Nothing
+ * needs to wait for it before a later `requestWindow()` either: that call closes any
+ * previous PiP window itself.
  */
 export function closeDocumentPipWindow(win: Window): void {
   win.close()
