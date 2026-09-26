@@ -85,6 +85,7 @@ export function VideoPlayer({ channel, allChannels, returnTo = '/', epgChannelId
   const { addRecent } = useRecent()
 
   const [isPlaying, setIsPlaying] = useState(true)
+  const [isPip, setIsPip] = useState(false)
   const [isMuted, setIsMuted] = useState(false)
   const [isFullscreen, setIsFullscreen] = useState(false)
   const [isZoomed, setIsZoomed] = useState(false)
@@ -375,6 +376,33 @@ export function VideoPlayer({ channel, allChannels, returnTo = '/', epgChannelId
     }
   }, [])
 
+  // Native video PiP (togglePiP below): tracks isPip via the real browser events
+  // rather than an app-held flag, and closes this video's own PiP session on
+  // unmount so a leftover session from a previous VideoPlayer instance can't make
+  // togglePiP's identity check below take the wrong branch on the next open.
+  useLayoutEffect(() => {
+    const video = videoRef.current
+    if (!video) return
+    const onEnter = () => setIsPip(true)
+    const onLeave = () => {
+      setIsPip(false)
+      setIsPlaying(!video.paused)
+      if (video.paused && stallTimer.current) {
+        window.clearTimeout(stallTimer.current)
+        stallTimer.current = null
+      }
+    }
+    video.addEventListener('enterpictureinpicture', onEnter)
+    video.addEventListener('leavepictureinpicture', onLeave)
+    return () => {
+      video.removeEventListener('enterpictureinpicture', onEnter)
+      video.removeEventListener('leavepictureinpicture', onLeave)
+      if (document.pictureInPictureElement === video) {
+        document.exitPictureInPicture().catch(() => {})
+      }
+    }
+  }, [])
+
   const handleMouseMove = useCallback(() => {
     setShowHud(true)
     if (hideHudTimer.current) window.clearTimeout(hideHudTimer.current)
@@ -387,7 +415,7 @@ export function VideoPlayer({ channel, allChannels, returnTo = '/', epgChannelId
     const v = videoRef.current
     if (!v) return
     try {
-      if (document.pictureInPictureElement) {
+      if (document.pictureInPictureElement === v) {
         await document.exitPictureInPicture()
       } else if (document.pictureInPictureEnabled) {
         await v.requestPictureInPicture()
@@ -425,9 +453,10 @@ export function VideoPlayer({ channel, allChannels, returnTo = '/', epgChannelId
 
   // Runs the move-in when a window opens (and, redundantly but harmlessly, the
   // move-back on close/unmount — the real move-back already happened synchronously in
-  // useDocumentPip's pagehide handler, above, so a browsing-context teardown never
-  // races a React effect for playback state; this cleanup just keeps the DOM tidy for
-  // paths that don't go through 'pagehide', like a StrictMode double-invoke).
+  // useDocumentPip's close() or pagehide handler, via restoreVideoInPlace, so a
+  // browsing-context teardown never races a React effect for playback state; this
+  // cleanup just keeps the DOM tidy for paths that go through neither, like a
+  // StrictMode double-invoke).
   useEffect(() => {
     if (!pipWindow) return
     const video = videoRef.current
@@ -443,10 +472,6 @@ export function VideoPlayer({ channel, allChannels, returnTo = '/', epgChannelId
       console.error('[document-pip] could not move the video into the mini-player window', err)
       return
     }
-    // Temporary diagnostic (remove once the reopen-after-back bug is confirmed
-    // fixed): confirms the reparent itself succeeded, as distinct from the window
-    // opening but nothing visibly landing in it.
-    console.log('[document-pip] video reparented into pip window')
     video.style.width = '100%'
     video.style.height = 'calc(100% - 44px)'
     video.style.objectFit = 'contain'
@@ -677,23 +702,14 @@ export function VideoPlayer({ channel, allChannels, returnTo = '/', epgChannelId
     }
     sessionStorage.setItem('sl_last_viewed', channel.id)
     ;(document.activeElement as HTMLElement)?.blur?.()
-    if (pipWindow) {
-      // Close the mini-player and move the reparented <video> node back to the
-      // main document ourselves, synchronously, right here — rather than
-      // leaving either to fire later. closeDocPip() is fire-and-forget
-      // (win.close() doesn't wait), so the async 'pagehide' handler that
-      // normally does this move isn't guaranteed to run before navigate()
-      // below unmounts this component; restoreVideoInPlace() is idempotent
-      // (no-ops if the node's already back) so calling it early here and
-      // again later from 'pagehide' or unmount is harmless. Skipping this
-      // step risks the exact removeChild() crash restoreVideoInPlace exists
-      // to avoid, since the video would still be parented under the closing
-      // PiP window's document when React tears this tree down.
-      closeDocPip()
-      restoreVideoInPlace()
-    }
+    // Close the mini-player (a no-op when none is open). closeDocPip() moves the
+    // <video> back into this document and clears the hook's state synchronously,
+    // before navigate() below unmounts this tree, so nothing depends on the
+    // window's own 'pagehide' arriving first. It reads the hook's ref, not the
+    // `pipWindow` render value, so a stale closure can't skip it.
+    closeDocPip()
     navigate(returnTo, { state: { targetChannelId: channel.id } })
-  }, [cancelCountdown, channel.id, returnTo, navigate, destroyHls, pipWindow, closeDocPip, restoreVideoInPlace])
+  }, [cancelCountdown, channel.id, returnTo, navigate, destroyHls, closeDocPip])
 
   // The user's own choice to drop this channel from every list; undone in Settings.
   const handleHideChannel = useCallback(() => {
@@ -1501,7 +1517,8 @@ export function VideoPlayer({ channel, allChannels, returnTo = '/', epgChannelId
         className={`player__video${isZoomed ? ' player__video--zoomed' : ''}`}
         autoPlay
         playsInline
-        onWaiting={() => {
+        onWaiting={(e) => {
+          if (e.currentTarget.paused) return
           setIsBuffering(true)
           if (hasPlayedSuccessfully.current && !stallTimer.current) {
             const since = performance.now()
@@ -1519,6 +1536,14 @@ export function VideoPlayer({ channel, allChannels, returnTo = '/', epgChannelId
             stallTimer.current = window.setTimeout(checkStall, STALL_IDLE_MS)
           }
         }}
+        onPause={() => {
+          setIsPlaying(false)
+          if (stallTimer.current) {
+            window.clearTimeout(stallTimer.current)
+            stallTimer.current = null
+          }
+        }}
+        onPlay={() => setIsPlaying(true)}
         onPlaying={() => {
           if (stallTimer.current) {
             window.clearTimeout(stallTimer.current)
@@ -1965,11 +1990,12 @@ export function VideoPlayer({ channel, allChannels, returnTo = '/', epgChannelId
               </div>
 
               <button
-                className={`player__action-btn ${pipWindow ? 'player__action-btn--disabled' : ''}`}
+                className={`player__action-btn ${pipWindow ? 'player__action-btn--disabled' : isPip ? 'player__action-btn--active' : ''}`}
                 disabled={Boolean(pipWindow)}
                 onClick={togglePiP}
-                title={pipWindow ? 'Unavailable while the mini-player is open' : 'Picture-in-Picture'}
-                aria-label="Picture in Picture"
+                aria-pressed={isPip}
+                title={pipWindow ? 'Unavailable while the mini-player is open' : isPip ? 'Exit Picture-in-Picture' : 'Picture-in-Picture'}
+                aria-label={isPip ? 'Exit Picture-in-Picture' : 'Picture in Picture'}
               >
                 ⧉
               </button>
@@ -1977,30 +2003,19 @@ export function VideoPlayer({ channel, allChannels, returnTo = '/', epgChannelId
                 <button
                   className={`player__action-btn ${pipWindow ? 'player__action-btn--active' : ''}`}
                   onClick={() => {
-                    // Temporary diagnostic (remove once the reopen-after-back bug is
-                    // confirmed fixed): four rounds of fixes have shipped for this bug
-                    // with no console output ever reported back, so there's no signal
-                    // yet on which of "click didn't fire" / "requestWindow rejected" /
-                    // "resolved but window is dead/invisible" / "video didn't reparent"
-                    // is actually happening. These four logs are meant to be checked in
-                    // devtools the next time this fails and pasted back.
-                    console.log('[document-pip] toggle clicked', { pipWindow: Boolean(pipWindow), docPipSupported })
                     if (pipWindow) {
                       closeDocPip()
                       return
                     }
+                    // Called synchronously from the click so requestWindow() still
+                    // has this click's transient user activation.
                     openDocPip({ width: 360, height: 220 }).then((win) => {
-                      if (!win) {
-                        showToast('Could not open the mini-player — try again in a moment')
-                        return
-                      }
-                      console.log('[document-pip] requestWindow() resolved', {
-                        closed: win.closed,
-                        outerWidth: win.outerWidth,
-                        outerHeight: win.outerHeight,
-                      })
-                    }).catch((err) => {
-                      console.error('[document-pip] requestWindow() failed', err)
+                      if (!win) showToast('Could not open the mini-player — try again in a moment')
+                    }).catch((err: unknown) => {
+                      // Failure-path only: the DOMException name (NotAllowedError =
+                      // no user activation, InvalidStateError = browser refused the
+                      // window) is what a bug report needs.
+                      console.warn('[document-pip] requestWindow() rejected', err)
                       showToast('Could not open the mini-player — try again in a moment')
                     })
                   }}
