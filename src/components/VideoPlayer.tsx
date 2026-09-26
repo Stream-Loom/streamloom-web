@@ -386,11 +386,18 @@ export function VideoPlayer({ channel, allChannels, returnTo = '/', epgChannelId
     const onEnter = () => setIsPip(true)
     const onLeave = () => {
       setIsPip(false)
-      setIsPlaying(!video.paused)
-      if (video.paused && stallTimer.current) {
-        window.clearTimeout(stallTimer.current)
-        stallTimer.current = null
+      // Chrome's native PiP close ("X") pauses the video as part of closing the
+      // window — resume right away so returning to the tab is seamless instead
+      // of requiring an explicit play click. Its own "back to tab" control never
+      // pauses, so this is a no-op there.
+      if (video.paused) {
+        if (stallTimer.current) {
+          window.clearTimeout(stallTimer.current)
+          stallTimer.current = null
+        }
+        video.play().catch(() => {})
       }
+      setIsPlaying(true)
     }
     video.addEventListener('enterpictureinpicture', onEnter)
     video.addEventListener('leavepictureinpicture', onLeave)
